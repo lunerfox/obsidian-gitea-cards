@@ -1,0 +1,944 @@
+/*
+ * Gitea Cards — styles
+ *
+ * Card, chip, and badge rules are added by the feature tickets (F1–F8).
+ * Keep all styling here as CSS classes driven by Obsidian CSS variables;
+ * the plugin must not set inline styles (community-review guideline).
+ */
+
+.gitea-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-2) var(--size-4-3);
+	background-color: var(--background-secondary);
+}
+
+/* Per-project accent (issue #19): a subtle coloured left border, driven by the
+ * --gitea-accent custom property the plugin sets per repo. The repo-less default
+ * keeps the neutral border, so only configured projects are tinted. */
+.gitea-card--accented {
+	border-left: 3px solid var(--gitea-accent, var(--background-modifier-border));
+}
+
+.gitea-card--closed {
+	opacity: 0.6;
+}
+
+/* Closed issues read as resolved at a glance — strike the title through */
+.gitea-card--closed .gitea-card__title {
+	text-decoration: line-through;
+}
+
+.gitea-card--stale {
+	opacity: 0.5;
+	border-style: dashed;
+}
+
+/* Stale badge — shown when a card falls back to last-known data offline */
+.gitea-card__stale-badge {
+	flex-shrink: 0;
+	margin-left: auto;
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	white-space: nowrap !important;
+	word-break: keep-all !important;
+	overflow-wrap: normal !important;
+}
+
+.gitea-card--loading,
+.gitea-card--error,
+.gitea-card--empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.gitea-card--error {
+	color: var(--text-error);
+}
+
+/* Line 1 — number link + title */
+.gitea-card__header {
+	display: flex;
+	align-items: baseline;
+	gap: var(--size-4-2);
+}
+
+.gitea-card__number {
+	flex-shrink: 0;
+	font-weight: var(--font-semibold);
+	font-variant-numeric: tabular-nums;
+	/* A number like #21 is one indivisible token — never let a narrow phone
+	 * width (or a theme that boxes it into a tight pill) split it mid-token.
+	 * keep-all guards against themes that set word-break: break-all globally.
+	 * !important + overflow-wrap so a theme that pills the number can't override. */
+	white-space: nowrap !important;
+	word-break: keep-all !important;
+	overflow-wrap: normal !important;
+}
+
+.gitea-card__title {
+	font-weight: var(--font-medium);
+}
+
+
+/* Search block — a vertical list of cards. Positioning context for the
+   corner-pinned refresh button (issue #45). */
+.gitea-search {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.gitea-search__notice {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Search toolbar (issue #35, #36) — right-aligned "Refresh" and "Add issue"
+   buttons. Refresh forces a fresh fetch; Add issue opens the new-issue form
+   prefilled from the query. */
+.gitea-search__toolbar {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+}
+
+/* Search table (issue #33) — a compact, chip-like grid of results so the
+   progress of a set of issues reads at a glance, the default search layout. */
+.gitea-search-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--font-ui-small);
+	font-variant-numeric: tabular-nums;
+}
+
+.gitea-search-table__row {
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.gitea-search-table__row:last-child {
+	border-bottom: none;
+}
+
+.gitea-search-table__row:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.gitea-search-table__row--closed {
+	opacity: 0.6;
+}
+
+/* Per-project accent (issue #30): a coloured left edge mirroring the cards. */
+.gitea-search-table__row--accented .gitea-search-table__cell--dot {
+	border-left: 3px solid var(--gitea-accent, var(--background-modifier-border));
+}
+
+.gitea-search-table__cell {
+	padding: var(--size-4-1) var(--size-4-2);
+	vertical-align: middle;
+	text-align: left;
+}
+
+.gitea-search-table__cell--dot {
+	width: 1em;
+	padding-right: 0;
+}
+
+.gitea-search-table__dot {
+	display: inline-block;
+	width: 0.55em;
+	height: 0.55em;
+	border-radius: 50%;
+	background-color: var(--text-muted);
+}
+
+.gitea-search-table__dot--open {
+	background-color: var(--color-green);
+}
+
+.gitea-search-table__dot--closed {
+	background-color: var(--color-red);
+}
+
+.gitea-search-table__dot--in-progress {
+	background-color: var(--color-orange);
+}
+
+.gitea-search-table__cell--number {
+	white-space: nowrap;
+	width: 1%;
+}
+
+.gitea-search-table__number {
+	text-decoration: none;
+	color: var(--text-muted);
+	/* #21 is one indivisible token. The cell sets nowrap, but mobile themes that
+	 * restyle the inner link into a pill target this element directly and can
+	 * override the cell's value — so lock all three intra-token break properties
+	 * here, with !important, to win the cascade against a hostile theme. */
+	white-space: nowrap !important;
+	word-break: keep-all !important;
+	overflow-wrap: normal !important;
+}
+
+.gitea-search-table__number:hover {
+	color: var(--text-accent);
+	text-decoration: none;
+}
+
+.gitea-search-table__cell--repo {
+	white-space: nowrap;
+	width: 1%;
+	color: var(--text-muted);
+}
+
+/* Title takes the remaining width and truncates so a long title can't blow out
+   the row — the same restraint the inline chip title uses. */
+.gitea-search-table__cell--title {
+	width: 100%;
+	max-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gitea-search-table__cell--state {
+	white-space: nowrap;
+	width: 1%;
+	text-align: right;
+}
+
+/* Status badge, mirroring the inline chip's state pill. */
+.gitea-search-table__state {
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	/* CLOSED must never split to CLOS / ED. A plain nowrap (set previously) lost
+	 * to the user's mobile theme, which floats this badge into a tight top-right
+	 * pill and resets the break behaviour — so force all three break properties
+	 * with !important to stay whole regardless of theme. */
+	white-space: nowrap !important;
+	word-break: keep-all !important;
+	overflow-wrap: normal !important;
+}
+
+.gitea-search-table__state--open {
+	background-color: var(--color-green);
+	color: var(--text-on-accent);
+}
+
+.gitea-search-table__state--closed {
+	background-color: var(--color-red);
+	color: var(--text-on-accent);
+}
+
+.gitea-search-table__state--in-progress {
+	background-color: var(--color-orange);
+	color: var(--text-on-accent);
+}
+
+/* Line 2 — truncated body */
+.gitea-card__body {
+	margin-top: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+/* Line 3 — labels, author, milestone */
+.gitea-card__meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+}
+
+.gitea-card__labels {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+}
+
+.gitea-card__label {
+	padding: 0 var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--gitea-label-bg, var(--background-modifier-border));
+	color: var(--gitea-label-fg, var(--text-normal));
+	font-size: var(--font-ui-smaller);
+	line-height: 1.6;
+	/* Labels wrap *between* chips (the row flex-wraps), but an individual label
+	 * name shouldn't split mid-word. */
+	white-space: nowrap;
+}
+
+/* blocked-by:#N dependency chips — highlighted so blockers stand out, with the
+ * blocker's live state shown inline via the dot below. */
+.gitea-card__label--blocked-by {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	background-color: var(--background-modifier-error);
+	color: var(--text-normal);
+	font-weight: var(--font-medium);
+}
+
+/* The blocker has closed — the dependency is cleared, so de-emphasise it */
+.gitea-card__label--resolved {
+	background-color: var(--background-modifier-success);
+	font-weight: var(--font-normal);
+	text-decoration: line-through;
+	opacity: 0.85;
+}
+
+/* Inline blocker-state dot. Semantics are the inverse of a card's own state
+ * dot: an open blocker is still blocking (red), a closed one is cleared (green). */
+.gitea-card__blocker-dot {
+	width: 0.55em;
+	height: 0.55em;
+	border-radius: 50%;
+	background-color: var(--text-muted);
+}
+
+.gitea-card__blocker-dot--open {
+	background-color: var(--color-red);
+}
+
+.gitea-card__blocker-dot--closed {
+	background-color: var(--color-green);
+}
+
+.gitea-card__author,
+.gitea-card__milestone,
+.gitea-card__repo-name,
+.gitea-card__comments,
+.gitea-card__state,
+.gitea-card__updated {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	color: var(--text-muted);
+}
+
+/* The open/closed state badge is a short word (OPEN / CLOSED) — keep it whole
+ * so a narrow phone width or a theme that floats it into a tight pill can't
+ * break it mid-token (e.g. CLOS / ED). !important so a theme that floats it into
+ * a tight pill can't override and force a wrap. */
+.gitea-card__state {
+	white-space: nowrap !important;
+	word-break: keep-all !important;
+	overflow-wrap: normal !important;
+}
+
+/* Repo identity at the front of the status row (issue #22) */
+.gitea-card__repo-name {
+	font-variant-numeric: tabular-nums;
+	text-decoration: none;
+}
+
+.gitea-card__repo-name:hover {
+	color: var(--text-normal);
+	text-decoration: underline;
+}
+
+.gitea-card__avatar {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.4em;
+	height: 1.4em;
+	border-radius: 50%;
+	background-color: var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+}
+
+/* Line 4 — comments, state, updated */
+.gitea-card__status {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-3);
+	margin-top: var(--size-4-1);
+	font-size: var(--font-ui-smaller);
+}
+
+.gitea-card__dot {
+	width: 0.6em;
+	height: 0.6em;
+	border-radius: 50%;
+	background-color: var(--text-muted);
+}
+
+.gitea-card__dot--open {
+	background-color: var(--color-green);
+}
+
+.gitea-card__dot--closed {
+	background-color: var(--color-red);
+}
+
+/* Milestone progress block */
+.gitea-milestone__header {
+	display: flex;
+	align-items: baseline;
+	gap: var(--size-4-2);
+}
+
+.gitea-milestone__title {
+	font-weight: var(--font-medium);
+}
+
+.gitea-milestone__percent {
+	flex-shrink: 0;
+	margin-left: auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Track + fill — fill width is driven by the --gitea-progress custom property
+ * the plugin sets per render (no inline style rules, like the label chips). */
+.gitea-milestone__bar {
+	margin-top: var(--size-4-2);
+	height: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	overflow: hidden;
+}
+
+.gitea-milestone__bar-fill {
+	width: var(--gitea-progress, 0%);
+	height: 100%;
+	border-radius: var(--radius-s);
+	background-color: var(--interactive-accent);
+}
+
+.gitea-milestone__stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-3);
+	margin-top: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Dependency graph (issue #39) — a DAG of issue nodes drawn as an SVG. The SVG
+ * carries only geometry; every colour/weight is a CSS class driven by Obsidian
+ * variables, mirroring the card/chip state vocabulary (open green, closed red,
+ * in-progress orange). The block scrolls horizontally if the graph is wider than
+ * the note, and the SVG scales down to fit. */
+.gitea-graph {
+	position: relative;
+	overflow-x: auto;
+}
+
+.gitea-graph__stale-badge {
+	display: inline-block;
+	margin-bottom: var(--size-4-2);
+}
+
+/* Graph header (issue #42) — the scope title on the left, a "Refresh" button on
+   the right that forces a fresh fetch on demand, matching the search toolbar. */
+.gitea-graph__header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-2);
+}
+
+/* Title/subtitle stack — sized down to match the graph node text so the header
+   reads as a quiet caption, not a banner (#44): the title mirrors the node
+   number (Issue #) and the subtitle mirrors the node title (Description). */
+.gitea-graph__heading {
+	display: flex;
+	flex-direction: column;
+}
+
+.gitea-graph__title {
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-medium);
+	color: var(--text-normal);
+}
+
+.gitea-graph__subtitle {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.gitea-graph__svg {
+	max-width: 100%;
+	height: auto;
+}
+
+.gitea-graph__svg text {
+	font-family: var(--font-interface);
+}
+
+/* Edges — blocker → dependent, with the arrowhead marker below. */
+.gitea-graph__edge {
+	fill: none;
+	stroke: var(--text-muted);
+	stroke-width: 1.5px;
+}
+
+.gitea-graph__arrow {
+	fill: var(--text-muted);
+}
+
+/* Nodes — an SVG anchor opening the issue in Gitea. */
+.gitea-graph__node {
+	cursor: pointer;
+}
+
+.gitea-graph__node-rect {
+	fill: var(--background-secondary);
+	stroke: var(--background-modifier-border);
+	stroke-width: 1.5px;
+}
+
+.gitea-graph__node:hover .gitea-graph__node-rect {
+	fill: var(--background-modifier-hover);
+}
+
+/* State colours the node outline, matching the dot/chip palette. */
+.gitea-graph__node--open .gitea-graph__node-rect {
+	stroke: var(--color-green);
+}
+
+.gitea-graph__node--closed .gitea-graph__node-rect {
+	stroke: var(--color-red);
+}
+
+.gitea-graph__node--in-progress .gitea-graph__node-rect {
+	stroke: var(--color-orange);
+}
+
+/* Closed work recedes; a still-blocked open issue is dimmed with a dashed
+ * outline, so the currently-unblocked nodes (what the processor picks up next)
+ * read as the live front. */
+.gitea-graph__node--closed {
+	opacity: 0.7;
+}
+
+.gitea-graph__node--blocked {
+	opacity: 0.5;
+}
+
+.gitea-graph__node--blocked .gitea-graph__node-rect {
+	stroke-dasharray: 4 3;
+}
+
+/* State dot inside each node, same palette as the cards/table. */
+.gitea-graph__node-dot {
+	fill: var(--text-muted);
+}
+
+.gitea-graph__node-dot--open {
+	fill: var(--color-green);
+}
+
+.gitea-graph__node-dot--closed {
+	fill: var(--color-red);
+}
+
+.gitea-graph__node-dot--in-progress {
+	fill: var(--color-orange);
+}
+
+.gitea-graph__node-number {
+	fill: var(--text-normal);
+	font-weight: var(--font-semibold);
+	font-size: var(--font-ui-small);
+	font-variant-numeric: tabular-nums;
+}
+
+.gitea-graph__node-title {
+	fill: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Line 5 — on-card quick actions (comment / toggle state / labels) */
+.gitea-card__actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+}
+
+.gitea-card__action {
+	padding: var(--size-4-1) var(--size-4-2);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Refresh sits at the far end of the bar, away from the write actions */
+.gitea-card__action--refresh {
+	order: 1;
+	margin-left: auto;
+}
+
+/* Shared manual-refresh control (issue #45) — one small, subtle ghost icon
+   used by the single-issue card, the search toolbar, and the graph header so
+   "refresh now" reads identically everywhere and stays out of the way until
+   hovered. Builds on Obsidian's clickable-icon, matching the settings-tab
+   refresh buttons. */
+.gitea-refresh-button {
+	color: var(--text-muted);
+	--icon-size: var(--icon-s);
+}
+
+.gitea-refresh-button:hover {
+	color: var(--text-normal);
+}
+
+/* Corner placement (issue #45) — the search and graph blocks pin their refresh
+   to the bottom-right corner so every "refresh now" affordance lives in the
+   same out-of-the-way spot, over the block rather than in a top toolbar. */
+.gitea-refresh-button--corner {
+	position: absolute;
+	right: var(--size-4-2);
+	bottom: var(--size-4-2);
+	z-index: 1;
+}
+
+/* Spin the icon while a refresh is in flight (issue #45) — the click adds this
+   class and it spins until the refreshed block tears the button down. */
+.gitea-refresh-button--spinning svg {
+	animation: gitea-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes gitea-refresh-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.gitea-refresh-button--spinning svg {
+		animation: none;
+	}
+}
+
+/* Inline comment box, revealed under the action bar */
+.gitea-card__comment-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	flex-basis: 100%;
+	margin-top: var(--size-4-1);
+}
+
+.gitea-card__comment-form--hidden {
+	display: none;
+}
+
+.gitea-card__comment-input {
+	width: 100%;
+	resize: vertical;
+	font-family: var(--font-text);
+}
+
+.gitea-card__comment-buttons {
+	display: flex;
+	gap: var(--size-4-2);
+}
+
+/* Comment-thread preview (issue #40) — the comment count on a single-issue card
+ * becomes a toggle button that expands a list of the latest comments inline. The
+ * button is reset to look like the plain count it replaces, with a hover/caret
+ * affordance to signal it is clickable. */
+.gitea-card__comments--toggle {
+	border: none;
+	box-shadow: none;
+	padding: 0;
+	margin: 0;
+	height: auto;
+	background-color: transparent;
+	color: var(--text-muted);
+	font-size: inherit;
+	line-height: inherit;
+	cursor: pointer;
+}
+
+.gitea-card__comments--toggle:hover {
+	color: var(--text-normal);
+}
+
+.gitea-card__comments-caret {
+	font-size: 0.85em;
+}
+
+/* The expanded thread sits between the status line and the action bar. */
+.gitea-card__comments-thread {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+	padding-top: var(--size-4-2);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Loading / empty / stale / "older hidden" one-liners inside the thread. */
+.gitea-card__comments-loading,
+.gitea-card__comments-message {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.gitea-card__comment-header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-1);
+	font-size: var(--font-ui-smaller);
+}
+
+.gitea-card__comment-author {
+	font-weight: var(--font-medium);
+	color: var(--text-normal);
+}
+
+.gitea-card__comment-time {
+	color: var(--text-muted);
+}
+
+/* Rendered Markdown body — kept compact; trim the outer margins Obsidian's
+ * Markdown renderer adds to the first/last block so comments stack tightly. */
+.gitea-card__comment-body {
+	margin-top: var(--size-4-1);
+	font-size: var(--font-ui-small);
+}
+
+.gitea-card__comment-body > :first-child {
+	margin-top: 0;
+}
+
+.gitea-card__comment-body > :last-child {
+	margin-bottom: 0;
+}
+
+/* Inline chip — a completed GITEA:owner/repo:#123 reference in rendered prose */
+.gitea-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	color: var(--text-normal);
+	/* Chips render inline in prose, so size relative to the surrounding text
+	 * (em) rather than a fixed UI scale — this keeps them in step with the
+	 * note's font size instead of staying small when the reader zooms text. */
+	font-size: 0.9em;
+	font-variant-numeric: tabular-nums;
+	text-decoration: none;
+	line-height: 1.5;
+}
+
+.gitea-chip:hover {
+	background-color: var(--background-modifier-hover);
+	text-decoration: none;
+}
+
+/* Per-project accent (issue #30): mirror the card's coloured left border on the
+ * inline chip, driven by the same --gitea-accent custom property the plugin
+ * sets per repo. Chips without a configured accent keep the plain background. */
+.gitea-chip--accented {
+	border-left: 3px solid var(--gitea-accent, var(--background-modifier-border));
+}
+
+.gitea-chip--closed {
+	opacity: 0.6;
+}
+
+.gitea-chip__dot {
+	width: 0.55em;
+	height: 0.55em;
+	border-radius: 50%;
+	background-color: var(--text-muted);
+}
+
+.gitea-chip__dot--open {
+	background-color: var(--color-green);
+}
+
+.gitea-chip__dot--closed {
+	background-color: var(--color-red);
+}
+
+.gitea-chip__dot--in-progress {
+	background-color: var(--color-orange);
+}
+
+/* Issue title, shown once the issue loads — truncated so a long title can't
+   blow out the line it sits in. */
+.gitea-chip__title {
+	overflow: hidden;
+	max-width: 24em;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Open/closed status badge, mirroring the full card's state pill. */
+.gitea-chip__state {
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	color: var(--text-muted);
+	/* Relative to the chip (em) so it tracks the surrounding text too. */
+	font-size: 0.85em;
+	font-weight: var(--font-semibold);
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	white-space: nowrap !important;
+	word-break: keep-all !important;
+	overflow-wrap: normal !important;
+}
+
+.gitea-chip__state--open {
+	background-color: var(--color-green);
+	color: var(--text-on-accent);
+}
+
+.gitea-chip__state--closed {
+	background-color: var(--color-red);
+	color: var(--text-on-accent);
+}
+
+.gitea-chip__state--in-progress {
+	background-color: var(--color-orange);
+	color: var(--text-on-accent);
+}
+
+/* Keep the placeholder chip compact (just the dot + number) before the issue
+   has loaded — empty title/state slots add no width or stray padding. */
+.gitea-chip__title:empty,
+.gitea-chip__state:empty {
+	display: none;
+}
+
+/* Inline autocomplete suggestions (EditorSuggest dropdown) */
+.gitea-suggestion {
+	display: flex;
+	align-items: baseline;
+	gap: var(--size-4-2);
+}
+
+.gitea-suggestion__number {
+	flex-shrink: 0;
+	font-weight: var(--font-semibold);
+	font-variant-numeric: tabular-nums;
+}
+
+.gitea-suggestion__title {
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* New-issue / convert-selection modal */
+.gitea-new-issue__body {
+	width: 100%;
+	resize: vertical;
+	font-family: var(--font-text);
+}
+
+/* Toggleable label chips. The grid wraps and is height-capped + scrollable, so
+ * a repo with many labels never grows the modal unbounded. */
+.gitea-new-issue__labels {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	max-height: 12em;
+	overflow-y: auto;
+	padding: var(--size-4-1) 0;
+}
+
+/* Unselected chip: outlined in the label's colour. Tapping fills it in. */
+.gitea-new-issue__label {
+	height: auto;
+	padding: var(--size-4-1) var(--size-4-2);
+	border: 1px solid var(--gitea-label-bg, var(--background-modifier-border));
+	border-radius: var(--radius-s);
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.4;
+	cursor: pointer;
+}
+
+.gitea-new-issue__label.is-selected {
+	background-color: var(--gitea-label-bg, var(--background-modifier-border));
+	color: var(--gitea-label-fg, var(--text-normal));
+}
+
+/*
+ * Remove affordance on a selected milestone chip in the graph wizard (issue #43):
+ * the chip is a dropdown-added member of the set, clicked to drop it back out.
+ */
+.gitea-new-issue__label-remove {
+	margin-inline-start: var(--size-4-1);
+	opacity: 0.7;
+}
+
+.gitea-new-issue__notice {
+	padding: var(--size-4-2) 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+/* Insert-existing-issue modal */
+.gitea-insert-issue__notice {
+	padding: var(--size-4-2) 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+/* Search-query wizard (issue #34) */
+.gitea-search-wizard__notice {
+	padding: var(--size-4-2) 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+/* Live preview of the generated block — read-only, monospace, wraps long lines. */
+.gitea-search-wizard__preview {
+	margin: 0 0 var(--size-4-2);
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* Mobile (issue #28) — Obsidian sets body.is-mobile on phones. Tighten the
+ * inter-item gaps in the meta/status rows so the now-unbreakable badges have a
+ * little more room to sit on one line before the row wraps between them.
+ * Desktop rendering is untouched. */
+body.is-mobile .gitea-card__meta,
+body.is-mobile .gitea-card__status {
+	gap: var(--size-4-1);
+}

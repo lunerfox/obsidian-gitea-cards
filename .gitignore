@@ -1,0 +1,17 @@
+# build output (attached to releases, not committed)
+main.js
+main.js.map
+
+# dependencies
+node_modules/
+
+# obsidian / editor
+.DS_Store
+*.log
+
+# secrets — never commit
+.env
+data.json
+
+# maintainer-local instructions — NAS paths, internal URLs, deploy ritual
+CLAUDE.local.md

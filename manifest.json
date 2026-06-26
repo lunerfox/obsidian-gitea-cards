@@ -1,0 +1,10 @@
+{
+	"id": "gitea-cards",
+	"name": "Gitea Cards",
+	"version": "0.30.0",
+	"minAppVersion": "1.5.0",
+	"description": "Render live, auto-refreshing Gitea issue cards in your notes and create issues without leaving the editor.",
+	"author": "lunerfox",
+	"authorUrl": "https://github.com/lunerfox",
+	"isDesktopOnly": false
+}
