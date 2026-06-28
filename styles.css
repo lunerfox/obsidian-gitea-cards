@@ -1137,3 +1137,62 @@ body.is-mobile .gitea-card__meta,
 body.is-mobile .gitea-card__status {
 	gap: var(--size-4-1);
 }
+
+/* Mobile search table (issue #59) — phone Obsidian themes routinely restyle plain
+ * <table>s for small screens: they float each row into a spaced card, inflate cell
+ * padding, override our intra-token break rules, and let the table grow past the
+ * viewport. On the compact search table that reads as the reported breakage — big
+ * gaps between rows, the issue number wrapping (#5 / 6), and the title + state badge
+ * spilling off the right edge. Desktop is perfect because desktop themes leave
+ * tables alone, so this repair is scoped to body.is-mobile and forces the table back
+ * to a tight, fixed-width grid. The resets use !important on purpose (the same
+ * theme-proofing rationale as the badge rules above): a hostile mobile theme's
+ * `td`/`tr`/`table` rules otherwise out-specify ours. */
+body.is-mobile .gitea-search-table {
+	/* table-layout: fixed pins the table to the container width so it can never
+	 * overflow the viewport; the title column then absorbs the slack and truncates
+	 * with its existing ellipsis instead of pushing the row off-screen. */
+	display: table !important;
+	table-layout: fixed !important;
+	width: 100% !important;
+	margin: 0 !important;
+}
+
+body.is-mobile .gitea-search-table tbody {
+	display: table-row-group !important;
+}
+
+/* Undo themes that turn each row into a spaced, padded card — the source of the
+ * "weird spacing" between rows. */
+body.is-mobile .gitea-search-table__row {
+	display: table-row !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	background-color: transparent !important;
+	border-radius: 0 !important;
+}
+
+body.is-mobile .gitea-search-table__cell {
+	display: table-cell !important;
+	padding: var(--size-4-1) !important;
+	vertical-align: middle !important;
+}
+
+/* The state dot already encodes open/closed/in-progress, so the text badge is
+ * redundant on a narrow phone — and it, plus the cross-repo owner/repo column, were
+ * the cells overflowing off the right edge. Drop both on mobile so the number and
+ * title own the row; the linked number still taps through to the full issue. */
+body.is-mobile .gitea-search-table__cell--state,
+body.is-mobile .gitea-search-table__cell--repo {
+	display: none !important;
+}
+
+/* With table-layout: fixed the dot and number need explicit columns: the dot a
+ * snug fixed width, the number wide enough for "#999" so it never wraps to #9 / 9. */
+body.is-mobile .gitea-search-table__cell--dot {
+	width: 1.4em !important;
+}
+
+body.is-mobile .gitea-search-table__cell--number {
+	width: 3.2em !important;
+}

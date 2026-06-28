@@ -1,6 +1,6 @@
 {
 	"name": "gitea-cards",
-	"version": "0.39.0",
+	"version": "0.40.0",
 	"description": "Render live, auto-refreshing Gitea issue cards in your notes and create issues without leaving the editor.",
 	"main": "main.js",
 	"type": "module",
