@@ -479,6 +479,21 @@
 	color: var(--text-muted);
 }
 
+/* Header links (issue #47) — the title opens the repo and each milestone opens
+   its page in Gitea. Keep the quiet caption colour so the header still reads as a
+   caption, not a banner; only the hover underline signals they are clickable. */
+a.gitea-graph__title,
+.gitea-graph__milestone-link {
+	color: inherit;
+	text-decoration: none;
+}
+
+a.gitea-graph__title:hover,
+.gitea-graph__milestone-link:hover {
+	cursor: pointer;
+	text-decoration: underline;
+}
+
 .gitea-graph__svg {
 	max-width: 100%;
 	height: auto;
@@ -658,6 +673,17 @@
 .gitea-card__comment-buttons {
 	display: flex;
 	gap: var(--size-4-2);
+	align-items: center;
+	flex-wrap: wrap;
+}
+
+/* Image-attach picker in the comment box (issue #56), shown only when "Show images
+ * in comments" is on. Pushed to the right so it trails the Send/Cancel buttons, and
+ * shrunk to the small UI scale so it sits inline without dominating the row. */
+.gitea-card__comment-file {
+	margin-left: auto;
+	font-size: var(--font-ui-smaller);
+	max-width: 100%;
 }
 
 /* Comment-thread preview (issue #40) — the comment count on a single-issue card
@@ -732,6 +758,136 @@
 
 .gitea-card__comment-body > :last-child {
 	margin-bottom: 0;
+}
+
+/* Images pasted into Gitea comments (issue #53), shown only when the
+ * "Show images in comments" setting is on. Sized by CSS (community rule —
+ * no inline styles): never wider than the card, capped height. */
+.gitea-card__comment-image {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	max-height: 320px;
+	margin: var(--size-4-2) 0;
+	border-radius: var(--radius-s);
+}
+
+/* While the authed bytes are in flight the native src is blanked, so show a
+ * dashed placeholder box in its place. */
+.gitea-card__comment-image--loading {
+	min-width: 64px;
+	min-height: 48px;
+	background-color: var(--background-secondary);
+	border: 1px dashed var(--background-modifier-border);
+}
+
+/* A loaded image is clickable — opens the in-app lightbox. */
+.gitea-card__comment-image--loaded {
+	cursor: zoom-in;
+}
+
+/* Shown in place of an image our token couldn't fetch (CF-Access reject /
+ * invalid token), carrying the auth-taxonomy message. */
+.gitea-card__comment-image-error {
+	display: inline-block;
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* Attachment strip (issue #54) — a wrapping row of image thumbnails and file
+ * chips under a single-issue card's body, shown only when "Show attachments" is
+ * on. Sized entirely in CSS (community rule — no inline styles). */
+.gitea-card__attachments {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-2);
+	margin-top: var(--size-4-2);
+}
+
+/* Image attachment thumbnail — a small fixed-height preview; click opens the
+ * shared lightbox (the --loaded state below adds the zoom cursor). */
+.gitea-card__attachment-thumb {
+	height: 64px;
+	width: auto;
+	max-width: 96px;
+	object-fit: cover;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--background-modifier-border);
+}
+
+/* While the authed bytes are in flight there is no src — show a dashed box. */
+.gitea-card__attachment-thumb--loading {
+	width: 64px;
+	background-color: var(--background-secondary);
+	border-style: dashed;
+}
+
+.gitea-card__attachment-thumb--loaded {
+	cursor: zoom-in;
+}
+
+/* Non-image attachment — a 📎 filename chip linking to the authed download. */
+.gitea-card__attachment-file {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	padding: 0 var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.6;
+	text-decoration: none;
+}
+
+.gitea-card__attachment-file:hover {
+	background-color: var(--background-modifier-hover);
+	text-decoration: none;
+}
+
+.gitea-card__attachment-file-name {
+	overflow: hidden;
+	max-width: 16em;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Shown in place of a thumbnail our token couldn't fetch (CF-Access reject /
+ * invalid token), carrying the auth-taxonomy message — mirrors the comment one. */
+.gitea-card__attachment-error {
+	display: inline-block;
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* In-app lightbox modal for a full-size comment image (issue #53). */
+.gitea-lightbox-modal {
+	max-width: 90vw;
+}
+
+.gitea-lightbox {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.gitea-lightbox__image {
+	max-width: 100%;
+	max-height: 80vh;
+	height: auto;
+	border-radius: var(--radius-s);
+}
+
+.gitea-lightbox__status {
+	padding: var(--size-4-4);
+	color: var(--text-muted);
 }
 
 /* Inline chip — a completed GITEA:owner/repo:#123 reference in rendered prose */
@@ -904,6 +1060,45 @@
 	padding: var(--size-4-2) 0;
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
+}
+
+/* Image picker (issue #57) — file input plus a wrapping grid of thumbnail
+ * previews of the queued-but-not-yet-uploaded images. */
+.gitea-new-issue__file {
+	margin: var(--size-4-1) 0;
+}
+
+.gitea-new-issue__previews {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	padding: var(--size-4-1) 0;
+}
+
+/* One preview: the thumbnail with a remove affordance pinned to its corner. */
+.gitea-new-issue__preview {
+	position: relative;
+}
+
+.gitea-new-issue__preview-img {
+	height: 64px;
+	width: auto;
+	max-width: 96px;
+	object-fit: cover;
+	border-radius: var(--radius-s);
+	border: 1px solid var(--background-modifier-border);
+}
+
+.gitea-new-issue__preview-remove {
+	position: absolute;
+	top: calc(-1 * var(--size-4-1));
+	inset-inline-end: calc(-1 * var(--size-4-1));
+	height: 20px;
+	width: 20px;
+	padding: 0;
+	border-radius: 50%;
+	line-height: 1;
+	cursor: pointer;
 }
 
 /* Insert-existing-issue modal */

@@ -2,6 +2,7 @@ import {
 	AbstractInputSuggest,
 	App,
 	ButtonComponent,
+	Component,
 	Editor,
 	EditorPosition,
 	EditorSuggest,
@@ -95,6 +96,24 @@ export interface GiteaCardsSettings {
 	 * expanded (issue #40). A `comments: N` block key overrides this per card.
 	 */
 	commentPreviewCount: number;
+	/**
+	 * Whether to load images pasted into Gitea comments inline in expanded threads
+	 * (issue #53). Default OFF — comments stay text-only as before. When ON, an
+	 * `<img>` pointing at our Gitea is fetched through {@link
+	 * GiteaCardsPlugin.loadAuthedImage} (carrying the token + `CF-Access-*` headers
+	 * a plain `<img src>` can't), so private/CF-Access attachments resolve.
+	 */
+	showCommentImages: boolean;
+	/**
+	 * Whether single-issue cards show an attachment strip — image thumbnails and
+	 * file chips for the issue's uploaded assets (issue #54). Default OFF, by the
+	 * maintainer's scope answer: turning it on costs one extra `…/assets` GET per
+	 * single `gitea-issue` card (coalesced/cached like every other request). When
+	 * off, cards stay strictly one-call and rely only on comment-thread images
+	 * (I2). List blocks (`gitea-search`/`gitea-milestone`) never fetch assets, so
+	 * a wall of cards stays one request each regardless of this setting.
+	 */
+	showAttachments: boolean;
 	defaultRepo: string;
 	/**
 	 * The repo the New issue modal last created an issue in. Seeds the repo picker
@@ -133,6 +152,8 @@ export const DEFAULT_SETTINGS: GiteaCardsSettings = {
 	refreshIntervalSeconds: 60,
 	truncationLength: 160,
 	commentPreviewCount: 3,
+	showCommentImages: false,
+	showAttachments: false,
 	defaultRepo: "",
 	lastRepo: "",
 	insertFormat: "card",
@@ -156,6 +177,8 @@ interface GiteaUser {
 }
 
 interface GiteaMilestone {
+	/** Gitea's milestone id — used to link a graph header's milestone (issue #47). */
+	id: number;
 	title: string;
 }
 
@@ -210,6 +233,34 @@ interface GiteaComment {
 	body: string;
 	user: GiteaUser;
 	created_at: string;
+}
+
+/**
+ * One attachment as returned by `GET .../issues/{index}/assets` (issue #54). The
+ * card attachment strip needs the `name` (to label the chip and detect images by
+ * extension) and `browser_download_url`; the latter's host is Gitea's `ROOT_URL`
+ * (often a LAN address), so — like every other link — it is rewritten onto the
+ * configured base before use rather than trusted as-is.
+ */
+interface GiteaAsset {
+	id: number;
+	name: string;
+	size: number;
+	uuid: string;
+	browser_download_url: string;
+}
+
+/**
+ * The attachment Gitea returns from a `POST .../assets` upload (issue #55) — the
+ * outbound counterpart to {@link GiteaAsset}. Callers splice `![name](/attachments/
+ * {uuid})` (or `[name](…)` for non-images) into an issue/comment body; the
+ * `browser_download_url` host is Gitea's `ROOT_URL` and is rewritten onto the
+ * configured base like every other link rather than trusted as-is.
+ */
+export interface GiteaAttachment {
+	uuid: string;
+	name: string;
+	browser_download_url: string;
 }
 
 /** A parsed `owner/repo#index` reference. */
@@ -350,6 +401,17 @@ export interface CacheLoadResult<T> {
 
 /** Backwards-compatible alias for a single-issue load result. */
 export type IssueLoadResult = CacheLoadResult<GiteaIssue>;
+
+/**
+ * The cached payload behind {@link GiteaCardsPlugin.loadAuthedImage}: the raw
+ * attachment bytes plus their content type. We cache the *bytes*, not a per-render
+ * object URL — each render mints (and revokes) its own short-lived object URL from
+ * the shared bytes, so the auto-refresh loop's constant card rebuilds never leak.
+ */
+export interface AuthedImage {
+	data: ArrayBuffer;
+	contentType: string;
+}
 
 /** Per-key state held by {@link CoalescingCache}. */
 interface CacheEntry<T> {
@@ -602,6 +664,194 @@ export function buildIssueUrl(baseUrl: string, ref: IssueRef): string {
 export function buildRepoUrl(baseUrl: string, owner: string, repo: string): string {
 	const base = baseUrl.replace(/\/+$/, "");
 	return `${base}/${owner}/${repo}`;
+}
+
+/** Whether a URL path carries a Gitea attachment segment (`/attachments/<uuid>`). */
+const ATTACHMENT_PATH_PATTERN = /\/attachments\/[^/]+/i;
+
+/**
+ * Resolution of an `<img src>` found in issue/comment markdown into a fetchable
+ * URL plus whether it must ride our authenticated loader.
+ */
+export interface ResolvedImageSrc {
+	/** The absolute URL to load (rewritten onto the configured host when ours). */
+	url: string;
+	/**
+	 * True when the URL points at our Gitea and must be fetched through {@link
+	 * GiteaCardsPlugin.loadAuthedImage} (an `<img src>` can't carry the auth
+	 * headers); false for `data:` URIs and foreign images a plain `<img>` loads.
+	 */
+	authed: boolean;
+}
+
+/**
+ * Resolve an `<img src>` from rendered Gitea markdown against the configured
+ * base URL, deciding whether it needs our authenticated loader.
+ *
+ * Gitea writes attachment images as host-relative `/attachments/<uuid>` (or, in
+ * older markdown, an absolute link on its `ROOT_URL` — often a LAN IP even when
+ * we reach Gitea through a Cloudflare base host). Both must be fetched with the
+ * PAT (+ `CF-Access-*`) headers, so they are rewritten onto the configured base
+ * and flagged `authed`. Same `ROOT_URL` caveat the issue links honour: trust the
+ * configured base host, never the one Gitea emits. Relative srcs resolve against
+ * the base (honouring a subpath mount). Foreign `https://…` images and `data:`/
+ * `blob:` URIs are left untouched for a plain `<img>` to load directly.
+ */
+export function resolveImageSrc(baseUrl: string, src: string): ResolvedImageSrc {
+	const trimmed = src.trim();
+	if (!trimmed || /^(data|blob):/i.test(trimmed)) {
+		return { url: trimmed, authed: false };
+	}
+	let base: URL;
+	try {
+		base = new URL(baseUrl);
+	} catch {
+		return { url: trimmed, authed: false };
+	}
+	let abs: URL | null = null;
+	try {
+		abs = new URL(trimmed);
+	} catch {
+		abs = null;
+	}
+	// Relative src — resolve against the configured base (honours a subpath mount).
+	if (!abs) {
+		try {
+			const root = baseUrl.replace(/\/+$/, "") + "/";
+			return { url: new URL(trimmed, root).href, authed: true };
+		} catch {
+			return { url: trimmed, authed: false };
+		}
+	}
+	// Absolute and already on our host — load it through the token as-is.
+	if (abs.host.toLowerCase() === base.host.toLowerCase()) {
+		return { url: abs.href, authed: true };
+	}
+	// Absolute attachment on a different host (Gitea's ROOT_URL) — rewrite the
+	// path onto the configured base host/scheme so the token reaches it.
+	if (ATTACHMENT_PATH_PATTERN.test(abs.pathname)) {
+		const rewritten = new URL(base.origin);
+		rewritten.pathname = abs.pathname;
+		rewritten.search = abs.search;
+		return { url: rewritten.href, authed: true };
+	}
+	// A genuinely foreign image — let a plain `<img src>` load it unauthenticated.
+	return { url: trimmed, authed: false };
+}
+
+/** File extensions the attachment strip renders as an inline thumbnail (issue #54). */
+const IMAGE_ASSET_PATTERN = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico|tiff?)$/i;
+
+/**
+ * Whether an attachment's filename names an image type the strip can thumbnail
+ * (issue #54). Detection is by extension — Gitea's assets endpoint reports a
+ * `name` but no MIME — so non-image uploads (logs, zips, PDFs) fall through to a
+ * `📎 filename` download chip instead.
+ */
+export function isImageAsset(name: string): boolean {
+	return IMAGE_ASSET_PATTERN.test(name.trim());
+}
+
+/**
+ * Markdown for an uploaded attachment to splice into an issue/comment body (issue
+ * #56). Gitea serves attachments at the root-relative `/attachments/{uuid}` path,
+ * which I2's comment-image pass rewrites onto the configured base before fetching —
+ * so the inserted link matches exactly what the Gitea web UI writes. Images get the
+ * `![…]` embed form; anything else a plain `[…]` link. The label is the stored
+ * filename with `]`/CR/LF stripped so it can't break out of the link text.
+ */
+export function attachmentMarkdown(att: GiteaAttachment): string {
+	const label = att.name.replace(/[\r\n\]]/g, " ").trim() || "attachment";
+	const link = `/attachments/${att.uuid}`;
+	return isImageAsset(att.name) ? `![${label}](${link})` : `[${label}](${link})`;
+}
+
+/**
+ * A filename for an image that arrives without one — a clipboard paste yields a
+ * `File` with an empty `name` (issue #56). Derives the extension from the MIME
+ * subtype (`image/png` → `pasted-image.png`), falling back to `png`.
+ */
+export function defaultImageName(mime: string): string {
+	const subtype = mime.split("/")[1]?.split(";")[0]?.trim() || "png";
+	return `pasted-image.${subtype}`;
+}
+
+/**
+ * Splice text into a textarea at the caret, putting it on its own line (issue #56).
+ * The attachment markdown lands where the user was typing, padded with a leading
+ * newline when it would otherwise share a line with existing text and a trailing
+ * one so the next keystroke starts fresh, and the caret is left after the insert.
+ */
+export function insertAtCursor(input: HTMLTextAreaElement, text: string): void {
+	const start = input.selectionStart ?? input.value.length;
+	const end = input.selectionEnd ?? input.value.length;
+	const before = input.value.slice(0, start);
+	const after = input.value.slice(end);
+	const lead = before && !before.endsWith("\n") ? "\n" : "";
+	const insert = `${lead}${text}\n`;
+	input.value = `${before}${insert}${after}`;
+	const caret = before.length + insert.length;
+	input.setSelectionRange(caret, caret);
+}
+
+/**
+ * Monotonic counter feeding each {@link buildMultipart} call a distinct boundary,
+ * so two uploads in one session never reuse a boundary token (mirrors {@link
+ * graphRenderSeq}'s role for marker ids).
+ */
+let multipartBoundarySeq = 0;
+
+/** A hand-built multipart/form-data body plus its matching `Content-Type`. */
+export interface MultipartBody {
+	/** The encoded request body, ready to hand to `requestUrl`. */
+	body: ArrayBuffer;
+	/** `multipart/form-data; boundary=…`, to set as the request's content type. */
+	contentType: string;
+}
+
+/**
+ * Build a single-part `multipart/form-data` body by hand (issue #55). The plugin
+ * has only ever sent JSON bodies, and Obsidian's `requestUrl` has no `FormData`
+ * (and no mobile-safe `Blob`-as-body path), so the multipart envelope is assembled
+ * as raw bytes: a UTF-8 preamble (the boundary + `Content-Disposition` naming the
+ * field and filename), the file bytes verbatim, then the closing boundary.
+ *
+ * The filename rides in `Content-Disposition` rather than a `?name=` query param,
+ * which is buggy in some Gitea versions (go-gitea#30766). CR/LF and `"` are stripped
+ * from the filename first so a picked file's name can't inject extra headers or
+ * break the envelope. The boundary carries a per-call token (counter-based) so it
+ * cannot collide with a previous upload; the `----GiteaCards` prefix keeps it from
+ * appearing in real file bytes. Uses only the web-standard `TextEncoder`/typed
+ * arrays, so it runs on mobile.
+ */
+export function buildMultipart(
+	fieldName: string,
+	filename: string,
+	mime: string,
+	bytes: ArrayBuffer
+): MultipartBody {
+	const boundary = `----GiteaCards${(multipartBoundarySeq++).toString(36)}${Date.now().toString(
+		36
+	)}`;
+	const safeName = filename.replace(/[\r\n"]/g, "_");
+	const encoder = new TextEncoder();
+	const preamble = encoder.encode(
+		`--${boundary}\r\n` +
+			`Content-Disposition: form-data; name="${fieldName}"; filename="${safeName}"\r\n` +
+			`Content-Type: ${mime}\r\n\r\n`
+	);
+	const epilogue = encoder.encode(`\r\n--${boundary}--\r\n`);
+	const fileBytes = new Uint8Array(bytes);
+	const body = new Uint8Array(
+		preamble.length + fileBytes.length + epilogue.length
+	);
+	body.set(preamble, 0);
+	body.set(fileBytes, preamble.length);
+	body.set(epilogue, preamble.length + fileBytes.length);
+	return {
+		body: body.buffer,
+		contentType: `multipart/form-data; boundary=${boundary}`,
+	};
 }
 
 /** The issue path of a Gitea URL — `/{owner}/{repo}/issues/{index}`. */
@@ -1294,6 +1544,12 @@ export interface GraphEdge {
 export interface GraphData {
 	nodes: GraphNode[];
 	edges: GraphEdge[];
+	/**
+	 * Milestone name → Gitea id, gathered from the scoped issues so the header can
+	 * link each milestone in its subtitle (issue #47). A milestone with no issue
+	 * in the set has no entry and falls back to plain text.
+	 */
+	milestoneIds: Record<string, number>;
 }
 
 /** Stable `owner/repo#index` id for a node, matching the issue cache key. */
@@ -1724,6 +1980,31 @@ export default class GiteaCardsPlugin extends Plugin {
 		(repo) => this.fetchRepoCanWrite(repo)
 	);
 
+	/**
+	 * Shared cache/coalescer for authenticated image attachments (issue #52),
+	 * keyed by `img:<absolute-url>`. Holds the fetched bytes so N cards showing
+	 * the same image coalesce to one fetch per interval, just like the issue and
+	 * search caches. {@link loadAuthedImage} turns a cached entry into a per-render
+	 * object URL.
+	 */
+	imageCache: CoalescingCache<string, AuthedImage> = new CoalescingCache(
+		(url) => `img:${url}`,
+		(url) => this.fetchAuthedImage(url)
+	);
+
+	/**
+	 * Shared cache/coalescer for a single-issue card's attachment list (issue #54),
+	 * keyed by `assets:owner/repo#index`. Only single `gitea-issue` cards load
+	 * assets, and only when the "show attachments" setting is on, so this stays
+	 * empty for list blocks; duplicate cards on the same issue coalesce to one
+	 * `…/assets` GET per interval and degrade to last-known assets when offline,
+	 * like every other request.
+	 */
+	assetsCache: CoalescingCache<IssueRef, GiteaAsset[]> = new CoalescingCache(
+		(ref) => `assets:${ref.owner}/${ref.repo}#${ref.index}`,
+		(ref) => this.fetchIssueAssets(ref)
+	);
+
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.addSettingTab(new GiteaCardsSettingTab(this.app, this));
@@ -1970,7 +2251,7 @@ export default class GiteaCardsPlugin extends Plugin {
 	}
 
 	/**
-	 * Translate a non-success Gitea response into a single-line {@link
+	 * Translate a non-success HTTP status into a single-line {@link
 	 * GiteaRequestError}, disambiguating the two auth layers on the Cloudflare
 	 * path (see the plan's "Error disambiguation"):
 	 *
@@ -1984,9 +2265,12 @@ export default class GiteaCardsPlugin extends Plugin {
 	 *   came from Cloudflare rather than Gitea.
 	 *
 	 * `notFoundMessage` tailors the 404 to the call site (a missing issue vs. a
-	 * missing repo).
+	 * missing image). This is the status-only half shared by the JSON-API reads
+	 * ({@link ensureGiteaOk}) and the binary image loader ({@link
+	 * loadAuthedImage}) — the latter must NOT reject a non-JSON body, since a
+	 * successful attachment fetch returns `image/*` bytes.
 	 */
-	private ensureGiteaOk(
+	private ensureGiteaStatusOk(
 		response: RequestUrlResponse,
 		notFoundMessage: string
 	): void {
@@ -2018,6 +2302,17 @@ export default class GiteaCardsPlugin extends Plugin {
 		if (response.status >= 400) {
 			throw new GiteaRequestError(`Gitea returned HTTP ${response.status}.`);
 		}
+	}
+
+	/**
+	 * The JSON-API variant of {@link ensureGiteaStatusOk}: after the status
+	 * taxonomy passes, additionally reject a 2xx whose body is not JSON.
+	 */
+	private ensureGiteaOk(
+		response: RequestUrlResponse,
+		notFoundMessage: string
+	): void {
+		this.ensureGiteaStatusOk(response, notFoundMessage);
 		// A 2xx response whose body is not JSON means the request reached
 		// something other than the Gitea API — most often the base URL points at
 		// a web login page or reverse proxy that answers 200 with HTML. Reading
@@ -2111,6 +2406,89 @@ export default class GiteaCardsPlugin extends Plugin {
 		});
 		this.ensureGiteaOk(response, "Issue not found.");
 		return (response.json as GiteaComment[]) ?? [];
+	}
+
+	/**
+	 * Fetch an issue's uploaded attachments via `GET .../issues/{index}/assets`
+	 * (issue #54) — the optional second call behind the "show attachments" setting.
+	 * Returns `[{ name, browser_download_url, … }]`; the strip thumbnails the image
+	 * ones and chips the rest. Routed through {@link assetsCache} so it shares the
+	 * card's refresh cadence and coalesces across duplicate cards.
+	 */
+	async fetchIssueAssets(ref: IssueRef): Promise<GiteaAsset[]> {
+		const base = this.settings.baseUrl.replace(/\/+$/, "");
+		const url = `${base}/api/v1/repos/${this.issuePath(ref)}/assets`;
+		const headers = await this.buildAuthHeaders();
+		const response = await requestUrl({
+			url,
+			method: "GET",
+			headers,
+			throw: false,
+		});
+		this.ensureGiteaOk(response, "Issue not found.");
+		return (response.json as GiteaAsset[]) ?? [];
+	}
+
+	/**
+	 * Fetch an attachment's raw bytes through the supported `requestUrl()` with the
+	 * full auth headers (issue #52). An Obsidian `<img src>` can't carry the `token`
+	 * + `CF-Access-*` headers {@link buildAuthHeaders} adds, so private attachments
+	 * must be loaded here instead. Verified against Gitea's web `/attachments/<uuid>`
+	 * route: it honours `Authorization: token` (200 `image/*` with the PAT, 404
+	 * without), so the markdown src can be fetched directly — no API asset lookup.
+	 *
+	 * Reuses {@link ensureGiteaStatusOk} (not {@link ensureGiteaOk}) so the
+	 * CF-Access-302 vs 401/403 taxonomy still applies, *without* rejecting the
+	 * non-JSON image body a success returns. The raw bytes are cached by {@link
+	 * imageCache}; {@link loadAuthedImage} mints the per-render object URL.
+	 */
+	async fetchAuthedImage(url: string): Promise<AuthedImage> {
+		const headers = await this.buildAuthHeaders();
+		const response = await requestUrl({
+			url,
+			method: "GET",
+			headers,
+			throw: false,
+		});
+		this.ensureGiteaStatusOk(response, "Image not found.");
+		return {
+			data: response.arrayBuffer,
+			contentType:
+				getResponseHeader(response, "content-type") ||
+				"application/octet-stream",
+		};
+	}
+
+	/**
+	 * Resolve an authenticated attachment URL to a render-ready object URL (issue
+	 * #52), the foundation every image-display ticket rests on. Loads the bytes
+	 * through the shared {@link imageCache} (so duplicate images coalesce to one
+	 * fetch and degrade to last-known bytes when Gitea is unreachable), wraps them
+	 * in a `Blob`, and returns `URL.createObjectURL(blob)`.
+	 *
+	 * The object URL is registered for revocation on `owner`'s unload, so the
+	 * auto-refresh loop's constant card rebuilds never leak blobs — pass the
+	 * rendering {@link MarkdownRenderChild}. Throws {@link GiteaRequestError} (with
+	 * the auth-taxonomy message) when no bytes are available, so the caller can
+	 * render a "🔒 image blocked" placeholder; serves stale bytes silently when the
+	 * live fetch fails but a previous load succeeded.
+	 *
+	 * Uses only web-standard `Blob`/`URL` APIs, so it works on mobile.
+	 */
+	async loadAuthedImage(url: string, owner: Component): Promise<string> {
+		const result = await this.imageCache.load(url, this.refreshIntervalMs);
+		if (!result.value) {
+			throw (
+				result.error ??
+				new GiteaRequestError("Image could not be loaded.")
+			);
+		}
+		const blob = new Blob([result.value.data], {
+			type: result.value.contentType,
+		});
+		const objectUrl = URL.createObjectURL(blob);
+		owner.register(() => URL.revokeObjectURL(objectUrl));
+		return objectUrl;
 	}
 
 	/**
@@ -2224,10 +2602,20 @@ export default class GiteaCardsPlugin extends Plugin {
 		return response.json as GiteaMilestoneDetail;
 	}
 
+	/**
+	 * The repo a graph block is scoped to: its explicit `repo:` line, falling back
+	 * to the configured default. Null only when neither is set (a true global,
+	 * cross-repo graph). Matches the scope the header renders and links to, so the
+	 * fetch and the milestone validation below agree with what the user sees.
+	 */
+	private graphRepo(query: GraphQuery): string | null {
+		return query.repo ?? (this.settings.defaultRepo || null);
+	}
+
 	/** Reuse the search list machinery to fetch a graph's scoped issue set. */
 	private graphToSearchQuery(query: GraphQuery): SearchQuery {
 		return {
-			repo: query.repo,
+			repo: this.graphRepo(query),
 			state: query.state,
 			labels: query.labels,
 			milestones: query.milestones,
@@ -2235,6 +2623,52 @@ export default class GiteaCardsPlugin extends Plugin {
 			limit: query.limit,
 			layout: "table",
 		};
+	}
+
+	/**
+	 * Verify every milestone name a graph filters on actually exists in the repo.
+	 * Gitea's list endpoints silently *ignore* an unknown milestone name and return
+	 * the whole unfiltered set, so a typo'd or deleted milestone would otherwise
+	 * render as "all issues" rather than an error (issue #48). One
+	 * `GET .../milestones/{name}` per named milestone — a 404 means it does not
+	 * exist; the `{id|name}` endpoint matches by name regardless of state, so a
+	 * graph of a *completed* milestone still validates. Throws a single
+	 * {@link GiteaRequestError} naming the missing milestone(s).
+	 */
+	private async assertMilestonesExist(
+		repo: string,
+		milestones: string[]
+	): Promise<void> {
+		const base = this.settings.baseUrl.replace(/\/+$/, "");
+		const repoPath = this.repoPath(repo);
+		const headers = await this.buildAuthHeaders();
+		const missing: string[] = [];
+		await Promise.all(
+			milestones.map(async (name) => {
+				const url = `${base}/api/v1/repos/${repoPath}/milestones/${encodeURIComponent(
+					name
+				)}`;
+				const response = await requestUrl({
+					url,
+					method: "GET",
+					headers,
+					throw: false,
+				});
+				if (response.status === 404) {
+					missing.push(name);
+					return;
+				}
+				// Surface auth/redirect/other failures with the shared disambiguation.
+				this.ensureGiteaOk(response, `Milestone "${name}" not found.`);
+			})
+		);
+		if (missing.length > 0) {
+			const label = missing.length === 1 ? "Milestone" : "Milestones";
+			const names = missing.map((name) => `"${name}"`).join(", ");
+			throw new GiteaRequestError(
+				`${label} ${names} not found in ${repo} — check the milestone name.`
+			);
+		}
 	}
 
 	/**
@@ -2269,6 +2703,15 @@ export default class GiteaCardsPlugin extends Plugin {
 	 * state; a label blocker contributes only when it too is in the set.
 	 */
 	async fetchGraph(query: GraphQuery): Promise<GraphData> {
+		// A milestone filter Gitea can't resolve is silently dropped, returning the
+		// whole repo instead of the milestone's issues — validate the names up front
+		// so a typo'd or missing milestone errors rather than rendering every issue
+		// (issue #48). Only checkable against a concrete repo; a true global graph
+		// (no repo and no default) has no single repo to validate against.
+		const repo = this.graphRepo(query);
+		if (query.milestones.length > 0 && repo) {
+			await this.assertMilestonesExist(repo, query.milestones);
+		}
 		const items = await this.fetchSearchIssues(this.graphToSearchQuery(query));
 		const inSet = new Map<string, SearchResultItem>();
 		for (const item of items) {
@@ -2282,6 +2725,7 @@ export default class GiteaCardsPlugin extends Plugin {
 
 		const nodes: GraphNode[] = [];
 		const edges: GraphEdge[] = [];
+		const milestoneIds: Record<string, number> = {};
 		const edgeSeen = new Set<string>();
 		const addEdge = (from: string, to: string): void => {
 			if (from === to || !inSet.has(from) || !inSet.has(to)) {
@@ -2331,6 +2775,12 @@ export default class GiteaCardsPlugin extends Plugin {
 				}
 			}
 
+			// Remember the milestone's id (the scoped issues carry it) so the header
+			// can link it back to Gitea (issue #47).
+			if (issue.milestone && typeof issue.milestone.id === "number") {
+				milestoneIds[issue.milestone.title] = issue.milestone.id;
+			}
+
 			nodes.push({
 				id,
 				ref,
@@ -2342,7 +2792,7 @@ export default class GiteaCardsPlugin extends Plugin {
 			});
 		});
 
-		return { nodes, edges };
+		return { nodes, edges, milestoneIds };
 	}
 
 	/** Encode an `owner/repo` slug into the `{owner}/{repo}` path segment. */
@@ -2515,8 +2965,18 @@ export default class GiteaCardsPlugin extends Plugin {
 	 * false on any failure, so the buttons stay hidden rather than error.
 	 */
 	async loadCanWriteIssues(ref: IssueRef): Promise<boolean> {
+		return this.loadRepoCanWrite(`${ref.owner}/${ref.repo}`);
+	}
+
+	/**
+	 * The repo-string counterpart of {@link loadCanWriteIssues}, for callers that
+	 * hold an `owner/repo` slug rather than an {@link IssueRef} (the new-issue modal
+	 * scope-gating its image picker, issue #57). Shares the same coalescing cache,
+	 * so the probe is reused across the card and the modal. False on any failure.
+	 */
+	async loadRepoCanWrite(repo: string): Promise<boolean> {
 		const result = await this.repoWriteCache.load(
-			`${ref.owner}/${ref.repo}`,
+			repo,
 			this.refreshIntervalMs
 		);
 		return result.value ?? false;
@@ -2534,6 +2994,92 @@ export default class GiteaCardsPlugin extends Plugin {
 		const base = this.settings.baseUrl.replace(/\/+$/, "");
 		const url = `${base}/api/v1/repos/${this.issuePath(ref)}/comments`;
 		await this.giteaMutate(url, "POST", { body });
+	}
+
+	/**
+	 * Replace an issue's body via `PATCH .../issues/{index}` with `{body}`. Used by
+	 * the new-issue modal to append uploaded-image markdown after the issue exists
+	 * (issue #57) — Gitea has no single-call create-with-upload, so the order is
+	 * create → upload assets → PATCH the body with the returned `![](…)` markdown.
+	 */
+	async editIssueBody(ref: IssueRef, body: string): Promise<void> {
+		const base = this.settings.baseUrl.replace(/\/+$/, "");
+		const url = `${base}/api/v1/repos/${this.issuePath(ref)}`;
+		await this.giteaMutate(url, "PATCH", { body });
+	}
+
+	/**
+	 * Upload a file to a multipart asset endpoint and return the created
+	 * attachment (issue #55) — the shared engine behind {@link uploadIssueAsset}
+	 * and {@link uploadCommentAsset}. Unlike {@link giteaMutate} (which forces a
+	 * JSON body), this sends a hand-built {@link buildMultipart} body under its
+	 * generated `multipart/form-data` boundary, layered on top of the same auth
+	 * headers — so the `Authorization: token` + `CF-Access-*` credentials ride
+	 * alongside the multipart content type behind Cloudflare Access. The success
+	 * response is JSON (`{ uuid, name, browser_download_url }`); a server-side
+	 * size/type rejection comes back as a 4xx and is surfaced through the shared
+	 * {@link ensureGiteaOk} taxonomy. Requires a token with `write:issue` scope —
+	 * callers gate the UI on {@link loadCanWriteIssues} before reaching here.
+	 */
+	private async uploadAsset(
+		url: string,
+		filename: string,
+		mime: string,
+		bytes: ArrayBuffer
+	): Promise<GiteaAttachment> {
+		const headers = await this.buildAuthHeaders();
+		const { body, contentType } = buildMultipart(
+			"attachment",
+			filename,
+			mime,
+			bytes
+		);
+		headers["Content-Type"] = contentType;
+		const response = await requestUrl({
+			url,
+			method: "POST",
+			headers,
+			body,
+			throw: false,
+		});
+		this.ensureGiteaOk(response, "Issue not found.");
+		return response.json as GiteaAttachment;
+	}
+
+	/**
+	 * Attach a file to an issue via `POST .../issues/{index}/assets` (issue #55).
+	 * The natural target for both the comment quick-action and the new-issue modal
+	 * (an issue's assets live under the issue, not a not-yet-existing comment).
+	 */
+	async uploadIssueAsset(
+		ref: IssueRef,
+		filename: string,
+		mime: string,
+		bytes: ArrayBuffer
+	): Promise<GiteaAttachment> {
+		const base = this.settings.baseUrl.replace(/\/+$/, "");
+		const url = `${base}/api/v1/repos/${this.issuePath(ref)}/assets`;
+		return this.uploadAsset(url, filename, mime, bytes);
+	}
+
+	/**
+	 * Attach a file to an existing comment via
+	 * `POST .../issues/comments/{comment_id}/assets` (issue #55). Comment assets
+	 * key off the comment id, not the issue index, so the repo is passed
+	 * separately rather than via an {@link IssueRef}.
+	 */
+	async uploadCommentAsset(
+		repo: string,
+		commentId: number,
+		filename: string,
+		mime: string,
+		bytes: ArrayBuffer
+	): Promise<GiteaAttachment> {
+		const base = this.settings.baseUrl.replace(/\/+$/, "");
+		const url = `${base}/api/v1/repos/${this.repoPath(
+			repo
+		)}/issues/comments/${commentId}/assets`;
+		return this.uploadAsset(url, filename, mime, bytes);
 	}
 
 	/**
@@ -2919,15 +3465,58 @@ export default class GiteaCardsPlugin extends Plugin {
 		// (#41).
 		const header = wrapper.createDiv({ cls: "gitea-graph__header" });
 		const heading = header.createDiv({ cls: "gitea-graph__heading" });
-		heading.createDiv({
-			cls: "gitea-graph__title",
-			text: graphTitle(query, this.settings.defaultRepo),
-		});
-		const subtitle = graphSubtitle(query);
-		if (subtitle) {
-			heading.createDiv({
-				cls: "gitea-graph__subtitle",
-				text: subtitle,
+
+		// The repo this graph is scoped to (the configured default when the block
+		// omits one) — null for a global cross-repo set, which has no repo to link.
+		const repoSlug =
+			query.repo ??
+			(this.settings.defaultRepo.length > 0 ? this.settings.defaultRepo : null);
+		const parsedRepo = repoSlug ? splitRepo(repoSlug) : null;
+		const titleText = graphTitle(query, this.settings.defaultRepo);
+		// Title links to the repo on Gitea (issue #47); a global graph stays plain.
+		if (parsedRepo) {
+			const titleLink = heading.createEl("a", {
+				cls: "gitea-graph__title",
+				text: titleText,
+				href: buildRepoUrl(
+					this.settings.baseUrl,
+					parsedRepo.owner,
+					parsedRepo.repo
+				),
+			});
+			titleLink.setAttr("target", "_blank");
+			titleLink.setAttr("rel", "noopener");
+		} else {
+			heading.createDiv({ cls: "gitea-graph__title", text: titleText });
+		}
+
+		// Subtitle — each scoped milestone, linked to its Gitea page when its id is
+		// known (gathered from the scoped issues) and a repo is in scope (issue #47).
+		if (query.milestones.length > 0) {
+			const subtitle = heading.createDiv({ cls: "gitea-graph__subtitle" });
+			const label =
+				query.milestones.length === 1 ? "milestone" : "milestones";
+			subtitle.createSpan({ text: `${label} ` });
+			query.milestones.forEach((name, i) => {
+				if (i > 0) {
+					subtitle.createSpan({ text: ", " });
+				}
+				const milestoneId = data.milestoneIds?.[name];
+				if (repoSlug && typeof milestoneId === "number") {
+					const link = subtitle.createEl("a", {
+						cls: "gitea-graph__milestone-link",
+						text: name,
+						href: buildMilestoneUrl(
+							this.settings.baseUrl,
+							repoSlug,
+							milestoneId
+						),
+					});
+					link.setAttr("target", "_blank");
+					link.setAttr("rel", "noopener");
+				} else {
+					subtitle.createSpan({ text: name });
+				}
 			});
 		}
 
@@ -3226,6 +3815,18 @@ export default class GiteaCardsPlugin extends Plugin {
 			card.createDiv({ cls: "gitea-card__body", text: body });
 		}
 
+		// Attachment strip (issue #54) — image thumbnails + file chips under the
+		// body, behind the default-off "show attachments" setting. Gated on
+		// `commentPreview`, which only the single-issue card supplies (search and
+		// milestone list cards pass none), so list blocks never spend the extra
+		// `…/assets` GET; skipped on a stale offline card, where the call would
+		// only fail. The strip container is created synchronously to hold its place
+		// above the meta row, then filled — or removed when empty — once assets load.
+		if (commentPreview && this.settings.showAttachments && !stale) {
+			const strip = card.createDiv({ cls: "gitea-card__attachments" });
+			void this.renderAttachmentStrip(strip, ref, commentPreview.component);
+		}
+
 		// Line 3 — label chips, author, milestone.
 		const meta = card.createDiv({ cls: "gitea-card__meta" });
 		if (issue.labels?.length) {
@@ -3452,13 +4053,212 @@ export default class GiteaCardsPlugin extends Plugin {
 			header.createSpan({ cls: "gitea-card__comment-time", text: when });
 		}
 		const body = el.createDiv({ cls: "gitea-card__comment-body" });
-		void MarkdownRenderer.render(
+		void this.renderCommentBody(body, comment.body ?? "", preview);
+	}
+
+	/**
+	 * Markdown-render one comment body, then (issue #53) run the post-render image
+	 * pass so screenshots pasted into Gitea comments actually appear. Gitea writes
+	 * attachments as root-relative `/attachments/<uuid>` and a plain `<img src>`
+	 * can't carry our auth headers, so the native render leaves them broken. We
+	 * await the render, then rewrite each of *our* images to a token-authed object
+	 * URL via {@link loadAuthedImage}. Gated by {@link
+	 * GiteaCardsSettings.showCommentImages} (default off): when off the comment
+	 * renders exactly as before, no image fetch.
+	 */
+	private async renderCommentBody(
+		body: HTMLElement,
+		source: string,
+		preview: CommentPreviewOptions
+	): Promise<void> {
+		await MarkdownRenderer.render(
 			this.app,
-			comment.body ?? "",
+			source,
 			body,
 			preview.sourcePath,
 			preview.component
 		);
+		if (!this.settings.showCommentImages || !body.isConnected) {
+			return;
+		}
+		const images = body.querySelectorAll("img");
+		for (let i = 0; i < images.length; i++) {
+			const img = images[i];
+			const resolved = resolveImageSrc(
+				this.settings.baseUrl,
+				img.getAttribute("src") ?? ""
+			);
+			// Only proxy images on our Gitea; leave foreign/`data:`/`blob:` srcs to
+			// the plain `<img>` that already loaded them unauthenticated.
+			if (resolved.authed) {
+				this.loadCommentImage(img, resolved.url, preview.component);
+			}
+		}
+	}
+
+	/**
+	 * Swap one comment `<img>` from its broken native (root-relative / wrong-host)
+	 * src to a token-authed object URL (issue #53). Blanks the native src so the
+	 * unauthenticated request is dropped, shows a loading placeholder, then on load
+	 * sets the object URL and wires click → {@link ImageLightboxModal}. On failure
+	 * (CF-Access reject / token invalid) it replaces the image with a small "🔒"
+	 * placeholder carrying the auth-taxonomy message rather than a broken icon.
+	 */
+	private loadCommentImage(
+		img: HTMLImageElement,
+		url: string,
+		component: MarkdownRenderChild
+	): void {
+		const alt = img.getAttribute("alt") ?? "";
+		img.removeAttribute("src");
+		img.addClass("gitea-card__comment-image");
+		img.addClass("gitea-card__comment-image--loading");
+		this.loadAuthedImage(url, component)
+			.then((objectUrl) => {
+				if (!img.isConnected) {
+					return;
+				}
+				img.setAttr("src", objectUrl);
+				img.removeClass("gitea-card__comment-image--loading");
+				img.addClass("gitea-card__comment-image--loaded");
+				img.setAttr("aria-label", alt ? `View image: ${alt}` : "View image");
+				component.registerDomEvent(img, "click", () => {
+					new ImageLightboxModal(this, url, alt).open();
+				});
+			})
+			.catch((error: unknown) => {
+				if (!img.isConnected) {
+					return;
+				}
+				const message =
+					error instanceof Error
+						? error.message
+						: "Image could not be loaded.";
+				img.replaceWith(
+					createSpan({
+						cls: "gitea-card__comment-image-error",
+						text: `🔒 ${message}`,
+					})
+				);
+			});
+	}
+
+	/**
+	 * Load and render a single-issue card's attachment strip (issue #54). Pulls the
+	 * asset list from {@link assetsCache} (same throttle/backoff/stale lifecycle as
+	 * the card), then lays out image assets as small token-authed thumbnails and
+	 * everything else as `📎 filename` download chips. An issue with no attachments
+	 * — the common case — removes the empty strip so it adds no stray spacing, as
+	 * does an offline load with nothing cached. `component` owns the thumbnails'
+	 * object URLs and click handlers so they are revoked/torn down with the card.
+	 */
+	private async renderAttachmentStrip(
+		strip: HTMLElement,
+		ref: IssueRef,
+		component: Component
+	): Promise<void> {
+		const result = await this.assetsCache.load(ref, this.refreshIntervalMs);
+		// The card may have been torn down (or rebuilt) while in flight.
+		if (!strip.isConnected) {
+			return;
+		}
+		const assets = result.value ?? [];
+		if (assets.length === 0) {
+			strip.remove();
+			return;
+		}
+		for (const asset of assets) {
+			// Rewrite the asset URL onto the configured base — its
+			// browser_download_url carries Gitea's ROOT_URL host (often the LAN IP),
+			// same caveat the issue/comment images honour.
+			const resolved = resolveImageSrc(
+				this.settings.baseUrl,
+				asset.browser_download_url
+			);
+			if (isImageAsset(asset.name)) {
+				this.renderAttachmentThumbnail(
+					strip,
+					asset,
+					resolved.url,
+					component
+				);
+			} else {
+				this.renderAttachmentFileChip(strip, asset, resolved.url);
+			}
+		}
+	}
+
+	/**
+	 * Render one image attachment as a token-authed thumbnail (issue #54). Like the
+	 * comment images (I2) the bytes are fetched through {@link loadAuthedImage} —
+	 * a plain `<img src>` can't carry the auth headers — and the click opens the
+	 * shared in-app {@link ImageLightboxModal}. A fetch the token can't satisfy
+	 * (CF-Access reject / invalid token) collapses to a small "🔒" placeholder
+	 * carrying the auth-taxonomy message rather than a broken-image icon.
+	 */
+	private renderAttachmentThumbnail(
+		strip: HTMLElement,
+		asset: GiteaAsset,
+		url: string,
+		component: Component
+	): void {
+		const img = strip.createEl("img", {
+			cls: "gitea-card__attachment-thumb gitea-card__attachment-thumb--loading",
+		});
+		img.setAttr("alt", asset.name);
+		this.loadAuthedImage(url, component)
+			.then((objectUrl) => {
+				if (!img.isConnected) {
+					return;
+				}
+				img.setAttr("src", objectUrl);
+				img.removeClass("gitea-card__attachment-thumb--loading");
+				img.addClass("gitea-card__attachment-thumb--loaded");
+				img.setAttr("aria-label", `View image: ${asset.name}`);
+				component.registerDomEvent(img, "click", () => {
+					new ImageLightboxModal(this, url, asset.name).open();
+				});
+			})
+			.catch((error: unknown) => {
+				if (!img.isConnected) {
+					return;
+				}
+				const message =
+					error instanceof Error
+						? error.message
+						: "Image could not be loaded.";
+				img.replaceWith(
+					createSpan({
+						cls: "gitea-card__attachment-error",
+						text: `🔒 ${message}`,
+					})
+				);
+			});
+	}
+
+	/**
+	 * Render one non-image attachment as a `📎 filename` download chip (issue #54).
+	 * The chip links to the asset on the configured base host, opened in the system
+	 * browser — where the user's own session (cookies / interactive Cloudflare
+	 * Access) authenticates the download, unlike the plugin's header-less `<img>`.
+	 */
+	private renderAttachmentFileChip(
+		strip: HTMLElement,
+		asset: GiteaAsset,
+		url: string
+	): void {
+		const chip = strip.createEl("a", {
+			cls: "gitea-card__attachment-file",
+			href: url,
+		});
+		chip.setAttr("target", "_blank");
+		chip.setAttr("rel", "noopener");
+		chip.setAttr("aria-label", `Download ${asset.name}`);
+		chip.createSpan({ cls: "gitea-card__attachment-file-icon", text: "📎" });
+		chip.createSpan({
+			cls: "gitea-card__attachment-file-name",
+			text: asset.name,
+		});
 	}
 
 	/**
@@ -3643,6 +4443,9 @@ export default class GiteaCardsPlugin extends Plugin {
 	/**
 	 * Build the inline comment box: a textarea plus send/cancel. Suspends the
 	 * card's auto-refresh while open; on send, posts the comment and re-renders.
+	 * When the image setting is on (and the token can write — this form only exists
+	 * inside the write-gated quick actions), an image picker and a clipboard-paste
+	 * handler upload to the issue's assets and splice the markdown into the draft.
 	 */
 	private openCommentForm(
 		form: HTMLElement,
@@ -3670,6 +4473,45 @@ export default class GiteaCardsPlugin extends Plugin {
 			text: "Cancel",
 		});
 
+		// Image attach (issue #56), gated on the same default-off image setting as
+		// the inbound rendering (I2) — turning it on means uploaded screenshots also
+		// show inline once the comment posts and the card re-renders. The write-scope
+		// gate is already handled by renderQuickActions, which builds this form.
+		if (this.settings.showCommentImages) {
+			const fileInput = buttons.createEl("input", {
+				cls: "gitea-card__comment-file",
+			});
+			fileInput.type = "file";
+			fileInput.accept = "image/*";
+			fileInput.setAttr("aria-label", "Attach an image");
+			fileInput.addEventListener("change", () => {
+				const file = fileInput.files?.[0] ?? null;
+				// Reset so picking the same file again still fires `change`.
+				fileInput.value = "";
+				if (file) {
+					void this.attachCommentImage(ref, file, input, send, fileInput);
+				}
+			});
+			// Pasting a screenshot straight into the box goes through the same path.
+			input.addEventListener("paste", (evt) => {
+				const item = Array.from(evt.clipboardData?.items ?? []).find(
+					(entry) =>
+						entry.kind === "file" && entry.type.startsWith("image/")
+				);
+				const file = item?.getAsFile() ?? null;
+				if (file) {
+					evt.preventDefault();
+					void this.attachCommentImage(
+						ref,
+						file,
+						input,
+						send,
+						fileInput
+					);
+				}
+			});
+		}
+
 		cancel.addEventListener("click", () => this.closeCommentForm(form, actions));
 		send.addEventListener("click", () => {
 			const body = input.value.trim();
@@ -3684,6 +4526,56 @@ export default class GiteaCardsPlugin extends Plugin {
 				"Comment posted."
 			);
 		});
+	}
+
+	/**
+	 * Upload an image to the issue's assets and splice its markdown into the comment
+	 * draft (issue #56). Uploading to the *issue* (not a not-yet-existing comment)
+	 * keeps it one step: the returned `![name](/attachments/{uuid})` goes in at the
+	 * cursor, and the normal Send posts the comment — whose re-render then shows the
+	 * image inline via I2 and refreshes the attachment strip (I3). Send and the file
+	 * picker are disabled during the in-flight upload so a half-uploaded draft can't
+	 * be posted; failures surface through the shared auth taxonomy as a notice.
+	 */
+	private async attachCommentImage(
+		ref: IssueRef,
+		file: File,
+		input: HTMLTextAreaElement,
+		sendButton: HTMLButtonElement,
+		fileInput: HTMLInputElement
+	): Promise<void> {
+		if (!file.type.startsWith("image/")) {
+			new Notice("Only images can be attached.");
+			return;
+		}
+		const sendWasDisabled = sendButton.disabled;
+		sendButton.disabled = true;
+		fileInput.disabled = true;
+		const progress = new Notice("Uploading image…", 0);
+		try {
+			const bytes = await file.arrayBuffer();
+			const name =
+				file.name && file.name.trim()
+					? file.name
+					: defaultImageName(file.type);
+			const attachment = await this.uploadIssueAsset(
+				ref,
+				name,
+				file.type,
+				bytes
+			);
+			insertAtCursor(input, attachmentMarkdown(attachment));
+			new Notice("Image attached.");
+		} catch (error) {
+			new Notice(
+				error instanceof Error ? error.message : "Image upload failed."
+			);
+		} finally {
+			progress.hide();
+			sendButton.disabled = sendWasDisabled;
+			fileInput.disabled = false;
+			input.focus();
+		}
 	}
 
 	/** Collapse the comment box and resume the card's auto-refresh. */
@@ -3859,6 +4751,7 @@ class IssueCardChild extends MarkdownRenderChild {
 					this.suspended = false;
 					this.plugin.cache.invalidate(this.ref);
 					this.plugin.commentsCache.invalidate(this.ref);
+					this.plugin.assetsCache.invalidate(this.ref);
 					void this.refresh();
 				},
 				setSuspended: (suspended) => {
@@ -4455,6 +5348,69 @@ class GiteaInlineSuggest extends EditorSuggest<InlineSuggestion> {
  * repo/issue lookups as the inline `GITEA:` autocomplete and the same card-block
  * builder as the new-issue flow, so it stays a thin UI over existing wiring.
  */
+/**
+ * Full-size, in-app lightbox for a comment image (issue #53, maintainer Q4 — an
+ * in-app modal, not the system browser). Loads the same token-authed bytes as the
+ * thumbnail through {@link GiteaCardsPlugin.loadAuthedImage}, owned by a private
+ * {@link Component} so the object URL is revoked when the modal closes (a `Modal`
+ * is not itself a `Component`, so it can't own the revocation directly).
+ */
+class ImageLightboxModal extends Modal {
+	private readonly owner = new Component();
+
+	constructor(
+		private readonly plugin: GiteaCardsPlugin,
+		private readonly url: string,
+		private readonly alt: string
+	) {
+		super(plugin.app);
+	}
+
+	async onOpen(): Promise<void> {
+		this.owner.load();
+		const { contentEl, modalEl } = this;
+		modalEl.addClass("gitea-lightbox-modal");
+		contentEl.empty();
+		contentEl.addClass("gitea-lightbox");
+		const status = contentEl.createDiv({
+			cls: "gitea-lightbox__status",
+			text: "Loading image…",
+		});
+		try {
+			const objectUrl = await this.plugin.loadAuthedImage(
+				this.url,
+				this.owner
+			);
+			if (!contentEl.isConnected) {
+				return;
+			}
+			status.remove();
+			const img = contentEl.createEl("img", {
+				cls: "gitea-lightbox__image",
+			});
+			img.setAttr("src", objectUrl);
+			if (this.alt) {
+				img.setAttr("alt", this.alt);
+			}
+		} catch (error: unknown) {
+			if (!contentEl.isConnected) {
+				return;
+			}
+			status.setText(
+				error instanceof Error
+					? error.message
+					: "Image could not be loaded."
+			);
+		}
+	}
+
+	onClose(): void {
+		// Revokes the object URL minted above (registered on the owner component).
+		this.owner.unload();
+		this.contentEl.empty();
+	}
+}
+
 class InsertIssueModal extends Modal {
 	private repo: string;
 	private issues: InlineIssueSummary[] = [];
@@ -4733,8 +5689,26 @@ class NewIssueModal extends Modal {
 
 	private repoSetting: Setting | null = null;
 	private metaEl: HTMLElement | null = null;
+	private attachEl: HTMLElement | null = null;
 	private submitButton: ButtonComponent | null = null;
 	private submitting = false;
+
+	/** Images queued in the picker, uploaded after the issue is created (issue #57). */
+	private pendingFiles: File[] = [];
+	/** Object URLs backing the thumbnail previews; revoked on rebuild/close. */
+	private previewUrls: string[] = [];
+	/**
+	 * The live thumbnail-preview grid, kept so a screenshot pasted into the
+	 * description can refresh it (issue #58). Null whenever the image picker is
+	 * absent (setting off or the token can't write the repo).
+	 */
+	private previewsEl: HTMLElement | null = null;
+	/**
+	 * Whether the image picker is currently active — the default-off image setting
+	 * is on *and* the token can write the repo. Gates the body paste-to-attach
+	 * (issue #58); recomputed on every repo switch by {@link renderAttachSection}.
+	 */
+	private attachEnabled = false;
 
 	constructor(
 		private readonly plugin: GiteaCardsPlugin,
@@ -4774,10 +5748,22 @@ class NewIssueModal extends Modal {
 			});
 			area.inputEl.rows = 6;
 			area.inputEl.addClass("gitea-new-issue__body");
+			// Pasting a screenshot into the description queues it in the image
+			// picker (issue #58), mirroring the comment box's paste-to-attach (I5).
+			// Non-image pastes — and pastes when the picker is unavailable — fall
+			// through as ordinary text.
+			area.inputEl.addEventListener("paste", (evt) => {
+				this.handleBodyPaste(evt);
+			});
 		});
 
 		// Labels / milestone / assignees depend on the repo; (re)built here.
 		this.metaEl = contentEl.createDiv();
+
+		// Image picker (issue #57). Gated on the same default-off image setting as
+		// the comment attach (I5) and hidden when the token can't write the repo;
+		// rebuilt per repo because write scope is repo-specific.
+		this.attachEl = contentEl.createDiv();
 
 		// Let the author choose how the new issue lands in the note: a full card
 		// or a compact inline status chip (issue #21). Only meaningful when invoked
@@ -4821,9 +5807,11 @@ class NewIssueModal extends Modal {
 
 		await this.renderRepoControl();
 		await this.renderMetadata();
+		await this.renderAttachSection();
 	}
 
 	onClose(): void {
+		this.clearPreviewUrls();
 		this.contentEl.empty();
 	}
 
@@ -4854,6 +5842,7 @@ class NewIssueModal extends Modal {
 				dropdown.onChange((value) => {
 					this.repo = value;
 					void this.renderMetadata();
+					void this.renderAttachSection();
 				});
 			});
 		} catch {
@@ -4867,7 +5856,10 @@ class NewIssueModal extends Modal {
 				button
 					.setIcon("refresh-cw")
 					.setTooltip("Load labels and milestones")
-					.onClick(() => void this.renderMetadata());
+					.onClick(() => {
+						void this.renderMetadata();
+						void this.renderAttachSection();
+					});
 			});
 		}
 	}
@@ -5047,6 +6039,142 @@ class NewIssueModal extends Modal {
 	}
 
 	/**
+	 * (Re)build the image picker (issue #57). Hidden unless the default-off image
+	 * setting is on *and* the token can write the current repo — the same gate the
+	 * card's quick actions and the comment attach use. Rebuilt on every repo switch
+	 * because write scope is repo-specific; a repo the token can't write drops the
+	 * picker and clears any queued files so a doomed upload can't be attempted.
+	 */
+	private async renderAttachSection(): Promise<void> {
+		const container = this.attachEl;
+		if (!container) {
+			return;
+		}
+		container.empty();
+		this.clearPreviewUrls();
+		// Default to "no picker" until proven otherwise, so a stale grid from a
+		// previous repo can't catch a body paste (issue #58).
+		this.previewsEl = null;
+		this.attachEnabled = false;
+
+		if (!this.plugin.settings.showCommentImages) {
+			this.pendingFiles = [];
+			return;
+		}
+
+		const repoAtFetch = this.repo;
+		let canWrite = false;
+		try {
+			canWrite = await this.plugin.loadRepoCanWrite(this.repo);
+		} catch {
+			canWrite = false;
+		}
+		if (this.repo !== repoAtFetch) {
+			return; // A newer render superseded this one.
+		}
+		if (!canWrite) {
+			this.pendingFiles = [];
+			return;
+		}
+
+		new Setting(container).setName("Images").setHeading();
+		const fileInput = container.createEl("input", {
+			cls: "gitea-new-issue__file",
+		});
+		fileInput.type = "file";
+		fileInput.accept = "image/*";
+		fileInput.multiple = true;
+		fileInput.setAttr("aria-label", "Attach images");
+
+		const previews = container.createDiv({ cls: "gitea-new-issue__previews" });
+		this.previewsEl = previews;
+		this.attachEnabled = true;
+		fileInput.addEventListener("change", () => {
+			const picked = Array.from(fileInput.files ?? []).filter((file) =>
+				file.type.startsWith("image/")
+			);
+			// Reset so re-picking the same file still fires `change`.
+			fileInput.value = "";
+			if (picked.length > 0) {
+				this.pendingFiles.push(...picked);
+				this.renderPreviews(previews);
+			}
+		});
+		this.renderPreviews(previews);
+	}
+
+	/**
+	 * Queue any images pasted into the description into the picker (issue #58),
+	 * mirroring the comment box's paste-to-attach (I5). Only acts when the image
+	 * picker is active (the default-off image setting is on and the token can write
+	 * the repo); otherwise — and for non-image pastes — the event is left alone so
+	 * the paste falls through as ordinary text. Queued files upload after the issue
+	 * is created, exactly like ones chosen through the file picker, so a paste and a
+	 * pick are indistinguishable downstream. A notice confirms the queue, since a
+	 * pasted image lands as a thumbnail below rather than as text in the box.
+	 */
+	private handleBodyPaste(evt: ClipboardEvent): void {
+		if (!this.attachEnabled || !this.previewsEl) {
+			return;
+		}
+		const images = Array.from(evt.clipboardData?.items ?? [])
+			.filter(
+				(entry) => entry.kind === "file" && entry.type.startsWith("image/")
+			)
+			.map((entry) => entry.getAsFile())
+			.filter((file): file is File => file !== null);
+		if (images.length === 0) {
+			return;
+		}
+		evt.preventDefault();
+		this.pendingFiles.push(...images);
+		this.renderPreviews(this.previewsEl);
+		new Notice(
+			images.length === 1
+				? "Image queued."
+				: `${images.length} images queued.`
+		);
+	}
+
+	/**
+	 * Render a removable thumbnail per queued file. Each preview is a blob object
+	 * URL (revoked on the next rebuild / on close) — no bytes are uploaded until
+	 * the issue is created. Rebuilt wholesale on add/remove so indices stay sound.
+	 */
+	private renderPreviews(grid: HTMLElement): void {
+		grid.empty();
+		this.clearPreviewUrls();
+		this.pendingFiles.forEach((file, index) => {
+			const item = grid.createDiv({ cls: "gitea-new-issue__preview" });
+			const url = URL.createObjectURL(file);
+			this.previewUrls.push(url);
+			const img = item.createEl("img", {
+				cls: "gitea-new-issue__preview-img",
+			});
+			img.src = url;
+			img.alt = file.name;
+			const remove = item.createEl("button", {
+				cls: "gitea-new-issue__preview-remove",
+				text: "×",
+			});
+			remove.type = "button";
+			remove.setAttr("aria-label", `Remove ${file.name}`);
+			remove.addEventListener("click", () => {
+				this.pendingFiles.splice(index, 1);
+				this.renderPreviews(grid);
+			});
+		});
+	}
+
+	/** Revoke every preview object URL, so they can't leak across rebuilds/close. */
+	private clearPreviewUrls(): void {
+		for (const url of this.previewUrls) {
+			URL.revokeObjectURL(url);
+		}
+		this.previewUrls = [];
+	}
+
+	/**
 	 * Validate, map the picked label/milestone names to IDs, POST the issue, and
 	 * on success drop a `gitea-issue` card into the editor and close. Errors are
 	 * surfaced as a notice with the submit button re-enabled for a retry.
@@ -5079,29 +6207,11 @@ class NewIssueModal extends Modal {
 			payload.milestone = this.milestoneId;
 		}
 
+		let issue: GiteaIssue;
 		try {
-			const issue = await this.plugin.createIssue(this.repo, payload);
-			const ref: IssueRef = {
-				owner: parsed.owner,
-				repo: parsed.repo,
-				index: issue.number,
-			};
-			if (this.options.editor) {
-				insertIssueReference(
-					this.options.editor,
-					ref,
-					this.insertFormat,
-					this.plugin.settings.keyword
-				);
-			}
-			// Remember this repo so the next New issue defaults to it (issue #23).
-			if (this.plugin.settings.lastRepo !== this.repo) {
-				this.plugin.settings.lastRepo = this.repo;
-				void this.plugin.saveSettings();
-			}
-			new Notice(`Created issue #${issue.number}.`);
-			this.close();
+			issue = await this.plugin.createIssue(this.repo, payload);
 		} catch (error) {
+			// Create failed — nothing exists yet, so re-enable for a clean retry.
 			new Notice(
 				error instanceof Error
 					? error.message
@@ -5109,6 +6219,98 @@ class NewIssueModal extends Modal {
 			);
 			this.submitting = false;
 			this.submitButton?.setDisabled(false).setButtonText("Create issue");
+			return;
+		}
+
+		const ref: IssueRef = {
+			owner: parsed.owner,
+			repo: parsed.repo,
+			index: issue.number,
+		};
+
+		// Upload any queued images to the now-existing issue, then PATCH the body to
+		// append their markdown so the card shows them (issue #57). The issue is
+		// already created, so a partway failure must NOT re-enable submit (that would
+		// duplicate the issue) — instead it's surfaced as a notice that names what
+		// landed, and whatever uploaded successfully is still spliced into the body.
+		if (this.pendingFiles.length > 0) {
+			this.submitButton?.setButtonText("Uploading images…");
+			await this.attachPendingImages(ref, issue.number);
+		}
+
+		if (this.options.editor) {
+			insertIssueReference(
+				this.options.editor,
+				ref,
+				this.insertFormat,
+				this.plugin.settings.keyword
+			);
+		}
+		// Remember this repo so the next New issue defaults to it (issue #23).
+		if (this.plugin.settings.lastRepo !== this.repo) {
+			this.plugin.settings.lastRepo = this.repo;
+			void this.plugin.saveSettings();
+		}
+		new Notice(`Created issue #${issue.number}.`);
+		this.close();
+	}
+
+	/**
+	 * Upload the queued images to the created issue and append their markdown to the
+	 * body (issue #57). Best-effort by design: the issue already exists, so this
+	 * never throws — it uploads each file, stops at the first failure, PATCHes the
+	 * body with whatever succeeded (so nothing is silently dropped), and surfaces a
+	 * clear notice naming the issue if any image didn't make it.
+	 */
+	private async attachPendingImages(
+		ref: IssueRef,
+		index: number
+	): Promise<void> {
+		const uploaded: string[] = [];
+		let failure: Error | null = null;
+		for (const file of this.pendingFiles) {
+			try {
+				const name =
+					file.name && file.name.trim()
+						? file.name
+						: defaultImageName(file.type);
+				const bytes = await file.arrayBuffer();
+				const attachment = await this.plugin.uploadIssueAsset(
+					ref,
+					name,
+					file.type,
+					bytes
+				);
+				uploaded.push(attachmentMarkdown(attachment));
+			} catch (error) {
+				failure =
+					error instanceof Error
+						? error
+						: new Error("Image upload failed.");
+				break;
+			}
+		}
+
+		if (uploaded.length > 0) {
+			const appended = uploaded.join("\n\n");
+			const newBody =
+				this.body.trim().length > 0
+					? `${this.body.replace(/\s+$/, "")}\n\n${appended}`
+					: appended;
+			try {
+				await this.plugin.editIssueBody(ref, newBody);
+			} catch (error) {
+				failure =
+					error instanceof Error
+						? error
+						: new Error("Could not update the issue body.");
+			}
+		}
+
+		if (failure) {
+			new Notice(
+				`Created issue #${index}, but not all images were attached: ${failure.message}`
+			);
 		}
 	}
 }
@@ -6038,6 +7240,34 @@ class GiteaCardsSettingTab extends PluginSettingTab {
 							Number.isFinite(parsed) && parsed > 0
 								? Math.min(parsed, COMMENTS_MAX_PREVIEW)
 								: DEFAULT_SETTINGS.commentPreviewCount;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Show images in comments")
+			.setDesc(
+				"Load images pasted into comments inline in expanded threads. Off by default — when off, comments stay text-only. Images are fetched with your token, so private and access-gated attachments load; click one to open it full size."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showCommentImages)
+					.onChange(async (value) => {
+						this.plugin.settings.showCommentImages = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Show attachments")
+			.setDesc(
+				"Show an attachment strip — image thumbnails and file chips — under single issue cards. Off by default. When on, each single issue card makes one extra request for its attachments; list blocks are unaffected and stay one request per card. Click a thumbnail to open it full size."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showAttachments)
+					.onChange(async (value) => {
+						this.plugin.settings.showAttachments = value;
 						await this.plugin.saveSettings();
 					})
 			);
