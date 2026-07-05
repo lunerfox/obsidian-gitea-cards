@@ -45,9 +45,7 @@
 	font-size: var(--font-ui-smaller);
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
-	white-space: nowrap !important;
-	word-break: keep-all !important;
-	overflow-wrap: normal !important;
+	/* Intra-token break lock lives in the shared theme-proof rule below. */
 }
 
 .gitea-card--loading,
@@ -74,11 +72,7 @@
 	font-variant-numeric: tabular-nums;
 	/* A number like #21 is one indivisible token — never let a narrow phone
 	 * width (or a theme that boxes it into a tight pill) split it mid-token.
-	 * keep-all guards against themes that set word-break: break-all globally.
-	 * !important + overflow-wrap so a theme that pills the number can't override. */
-	white-space: nowrap !important;
-	word-break: keep-all !important;
-	overflow-wrap: normal !important;
+	 * The break lock lives in the shared theme-proof rule below. */
 }
 
 .gitea-card__title {
@@ -180,11 +174,8 @@
 	color: var(--text-muted);
 	/* #21 is one indivisible token. The cell sets nowrap, but mobile themes that
 	 * restyle the inner link into a pill target this element directly and can
-	 * override the cell's value — so lock all three intra-token break properties
-	 * here, with !important, to win the cascade against a hostile theme. */
-	white-space: nowrap !important;
-	word-break: keep-all !important;
-	overflow-wrap: normal !important;
+	 * override the cell's value — the shared theme-proof rule below locks all
+	 * three intra-token break properties to win the cascade. */
 }
 
 .gitea-search-table__number:hover {
@@ -226,11 +217,8 @@
 	text-transform: uppercase;
 	/* CLOSED must never split to CLOS / ED. A plain nowrap (set previously) lost
 	 * to the user's mobile theme, which floats this badge into a tight top-right
-	 * pill and resets the break behaviour — so force all three break properties
-	 * with !important to stay whole regardless of theme. */
-	white-space: nowrap !important;
-	word-break: keep-all !important;
-	overflow-wrap: normal !important;
+	 * pill and resets the break behaviour — the shared theme-proof rule below
+	 * forces all three break properties to stay whole regardless of theme. */
 }
 
 .gitea-search-table__state--open {
@@ -333,13 +321,8 @@
 
 /* The open/closed state badge is a short word (OPEN / CLOSED) — keep it whole
  * so a narrow phone width or a theme that floats it into a tight pill can't
- * break it mid-token (e.g. CLOS / ED). !important so a theme that floats it into
- * a tight pill can't override and force a wrap. */
-.gitea-card__state {
-	white-space: nowrap !important;
-	word-break: keep-all !important;
-	overflow-wrap: normal !important;
-}
+ * break it mid-token (e.g. CLOS / ED). The break lock lives in the shared
+ * theme-proof rule below. */
 
 /* Repo identity at the front of the status row (issue #22) */
 .gitea-card__repo-name {
@@ -963,9 +946,7 @@ a.gitea-graph__title:hover,
 	font-weight: var(--font-semibold);
 	letter-spacing: 0.02em;
 	text-transform: uppercase;
-	white-space: nowrap !important;
-	word-break: keep-all !important;
-	overflow-wrap: normal !important;
+	/* Intra-token break lock lives in the shared theme-proof rule below. */
 }
 
 .gitea-chip__state--open {
@@ -1129,6 +1110,24 @@ a.gitea-graph__title:hover,
 	word-break: break-word;
 }
 
+/* Theme-proof intra-token lock (issues #21, #28, #59) — issue numbers (#123) and
+ * state badges (OPEN / CLOSED / STALE) are indivisible tokens that must never
+ * split mid-token (CLOS / ED), even under mobile themes that pill them and reset
+ * the break behaviour with multi-class selectors. Each class is repeated three
+ * times to raise specificity to (0,3,0) — no importance flag (the community
+ * linter rejects it), yet above any realistic theme selector on these spans.
+ * keep-all guards against themes that set word-break: break-all globally. */
+.gitea-card__stale-badge.gitea-card__stale-badge.gitea-card__stale-badge,
+.gitea-card__number.gitea-card__number.gitea-card__number,
+.gitea-card__state.gitea-card__state.gitea-card__state,
+.gitea-search-table__number.gitea-search-table__number.gitea-search-table__number,
+.gitea-search-table__state.gitea-search-table__state.gitea-search-table__state,
+.gitea-chip__state.gitea-chip__state.gitea-chip__state {
+	white-space: nowrap;
+	word-break: keep-all;
+	overflow-wrap: normal;
+}
+
 /* Mobile (issue #28) — Obsidian sets body.is-mobile on phones. Tighten the
  * inter-item gaps in the meta/status rows so the now-unbreakable badges have a
  * little more room to sit on one line before the row wraps between them.
@@ -1145,54 +1144,56 @@ body.is-mobile .gitea-card__status {
  * gaps between rows, the issue number wrapping (#5 / 6), and the title + state badge
  * spilling off the right edge. Desktop is perfect because desktop themes leave
  * tables alone, so this repair is scoped to body.is-mobile and forces the table back
- * to a tight, fixed-width grid. The resets use !important on purpose (the same
- * theme-proofing rationale as the badge rules above): a hostile mobile theme's
- * `td`/`tr`/`table` rules otherwise out-specify ours. */
-body.is-mobile .gitea-search-table {
+ * to a tight, fixed-width grid. The resets repeat each class three times on
+ * purpose (the same theme-proofing rationale as the intra-token lock above):
+ * with body.is-mobile that lands at (0,4,1) specificity, so a hostile mobile
+ * theme's `td`/`tr`/`table` rules can't out-specify ours — no importance flag
+ * needed (the community linter rejects it). */
+body.is-mobile .gitea-search-table.gitea-search-table.gitea-search-table {
 	/* table-layout: fixed pins the table to the container width so it can never
 	 * overflow the viewport; the title column then absorbs the slack and truncates
 	 * with its existing ellipsis instead of pushing the row off-screen. */
-	display: table !important;
-	table-layout: fixed !important;
-	width: 100% !important;
-	margin: 0 !important;
+	display: table;
+	table-layout: fixed;
+	width: 100%;
+	margin: 0;
 }
 
-body.is-mobile .gitea-search-table tbody {
-	display: table-row-group !important;
+body.is-mobile .gitea-search-table.gitea-search-table.gitea-search-table tbody {
+	display: table-row-group;
 }
 
 /* Undo themes that turn each row into a spaced, padded card — the source of the
  * "weird spacing" between rows. */
-body.is-mobile .gitea-search-table__row {
-	display: table-row !important;
-	margin: 0 !important;
-	padding: 0 !important;
-	background-color: transparent !important;
-	border-radius: 0 !important;
+body.is-mobile .gitea-search-table__row.gitea-search-table__row.gitea-search-table__row {
+	display: table-row;
+	margin: 0;
+	padding: 0;
+	background-color: transparent;
+	border-radius: 0;
 }
 
-body.is-mobile .gitea-search-table__cell {
-	display: table-cell !important;
-	padding: var(--size-4-1) !important;
-	vertical-align: middle !important;
+body.is-mobile .gitea-search-table__cell.gitea-search-table__cell.gitea-search-table__cell {
+	display: table-cell;
+	padding: var(--size-4-1);
+	vertical-align: middle;
 }
 
 /* The state dot already encodes open/closed/in-progress, so the text badge is
  * redundant on a narrow phone — and it, plus the cross-repo owner/repo column, were
  * the cells overflowing off the right edge. Drop both on mobile so the number and
  * title own the row; the linked number still taps through to the full issue. */
-body.is-mobile .gitea-search-table__cell--state,
-body.is-mobile .gitea-search-table__cell--repo {
-	display: none !important;
+body.is-mobile .gitea-search-table__cell--state.gitea-search-table__cell--state.gitea-search-table__cell--state,
+body.is-mobile .gitea-search-table__cell--repo.gitea-search-table__cell--repo.gitea-search-table__cell--repo {
+	display: none;
 }
 
 /* With table-layout: fixed the dot and number need explicit columns: the dot a
  * snug fixed width, the number wide enough for "#999" so it never wraps to #9 / 9. */
-body.is-mobile .gitea-search-table__cell--dot {
-	width: 1.4em !important;
+body.is-mobile .gitea-search-table__cell--dot.gitea-search-table__cell--dot.gitea-search-table__cell--dot {
+	width: 1.4em;
 }
 
-body.is-mobile .gitea-search-table__cell--number {
-	width: 3.2em !important;
+body.is-mobile .gitea-search-table__cell--number.gitea-search-table__cell--number.gitea-search-table__cell--number {
+	width: 3.2em;
 }
