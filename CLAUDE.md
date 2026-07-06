@@ -41,18 +41,31 @@ This project is push-mirrored to the public `github.com/lunerfox/obsidian-gitea-
 
 ## Versioning
 
+> **BLOCKING RULE: every code change bumps the version. No exceptions.**
+> A commit that touches any shipped source (`main.ts`, `styles.css`, `esbuild.config.mjs`,
+> `manifest.json`, dependencies in `package.json` / `package-lock.json`, or anything else
+> that ends up in a release) is **not complete** until the version is bumped in the **same
+> unit of work**. If you changed code and did not change the version, you are not done —
+> go back and bump it before committing.
+
 **Every change that ships gets a minor version bump.** Do not bump patch versions — this project advances the **minor** version for each functional change, fix, or content update so each release is easy to track in the Obsidian community directory and in `versions.json`.
 
 ```bash
 npm version minor
 ```
 
-`npm version minor` runs `version-bump.mjs`, which keeps `manifest.json` and `versions.json` in lockstep (and creates the matching git tag). Run it as part of the same unit of work whenever you make a change worth releasing.
+`npm version minor` runs `version-bump.mjs`, which keeps `manifest.json` and `versions.json` in lockstep (and creates the matching git tag). Run it as part of the same unit of work whenever you make a change worth releasing. If `npm version` can't run in your environment (no local git), bump by hand instead: set the new version in `package.json` **and** `manifest.json`, and append the new `"x.y.z": "<minAppVersion>"` line to `versions.json` — the exact three-file edit `version-bump.mjs` would have made.
+
+**"It's only a small change" is not an exception.** A dependency swap, a lint fix, a
+one-line tweak, a build-config edit — all of them ship, so all of them bump the version.
+The kind of change that slips through without a bump (e.g. replacing a devDependency) is
+exactly the kind this rule exists to catch.
 
 **Rules:**
 - Use `npm version minor` (not `patch`) for routine changes.
 - Reserve `npm version major` for breaking changes only (e.g. dropping config compatibility or changing the plugin `id`).
-- Confirm `manifest.json` `version` and the top key of `versions.json` match the new minor version before tagging a release.
+- Confirm `package.json` `version`, `manifest.json` `version`, and the top key of `versions.json` all match the new minor version before committing.
+- The **only** commits that may skip a version bump are those that touch no shipped source at all — docs-only edits to `README.md` / `CLAUDE.md`, or changes under `CLAUDE.local.md`. Everything else bumps.
 
 ---
 
@@ -84,4 +97,4 @@ npm version minor
 
 ## Validation
 
-Before declaring a ticket complete, run `npm install && npm run lint && npm run build` (or let CI do it) and confirm `npx eslint .` is clean and `main.js` builds. Report what was checked.
+Before declaring a ticket complete, run `npm install && npm run lint && npm run build` (or let CI do it) and confirm `npx eslint .` is clean and `main.js` builds. **If the ticket changed any shipped source, confirm the version was bumped** (`package.json`, `manifest.json`, and the top key of `versions.json` all agree on the new minor version) — an un-bumped code change is an incomplete ticket. Report what was checked.

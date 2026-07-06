@@ -1,6 +1,6 @@
 {
 	"name": "gitea-cards",
-	"version": "0.41.0",
+	"version": "0.42.0",
 	"description": "Render live, auto-refreshing Gitea issue cards in your notes and create issues without leaving the editor.",
 	"main": "main.js",
 	"type": "module",
@@ -23,7 +23,6 @@
 		"@codemirror/view": "^6.38.6",
 		"@eslint/js": "^9.39.4",
 		"@types/node": "^22.15.17",
-		"builtin-modules": "3.3.0",
 		"esbuild": "0.25.5",
 		"eslint": "^9.39.4",
 		"eslint-plugin-obsidianmd": "^0.3.0",
