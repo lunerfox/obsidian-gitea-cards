@@ -221,6 +221,12 @@ interface GiteaIssue {
 interface GiteaListIssue extends GiteaIssue {
 	pull_request?: unknown;
 	repository?: { full_name?: string } | null;
+	/**
+	 * Assignees carried by the list/search endpoints (issue #62). The global
+	 * search endpoint has no per-username assignee param, so an `assignee:` filter
+	 * is applied client-side against this array; may be absent on older Gitea.
+	 */
+	assignees?: GiteaUser[] | null;
 }
 
 /**
@@ -554,6 +560,19 @@ function isElementVisible(el: HTMLElement): boolean {
 		return augmented.isShown();
 	}
 	return el.offsetParent !== null;
+}
+
+/**
+ * Whether `el` is being rendered inside Obsidian's Export-to-PDF pass rather
+ * than the live preview. Export re-renders the whole note into a temporary
+ * `div.print` appended directly under `document.body`, then snapshots it
+ * synchronously (Electron `printToPDF`); live preview and reading view render
+ * inside a workspace leaf and never sit under `.print`. `closest` is a plain DOM
+ * read — no Obsidian-internal API — so this is the seam that lets a card await
+ * full hydration only when it is being exported (issue #66).
+ */
+function isExportingToPdf(el: HTMLElement): boolean {
+	return el.closest(".print") !== null;
 }
 
 const ISSUE_REF_PATTERN = /^([^/\s]+)\/([^#\s]+)#(\d+)$/;
@@ -975,6 +994,18 @@ function isInProgress(issue: GiteaIssue, inProgressLabel: string): boolean {
 }
 
 /**
+ * Whether a list/search issue is assigned to the given login (issue #62). The
+ * match is case-insensitive on the trimmed login; `assignee` is expected already
+ * lower-cased by the caller. Used to filter global-search results, which the
+ * Gitea endpoint can't narrow by assignee server-side.
+ */
+function issueHasAssignee(issue: GiteaListIssue, assignee: string): boolean {
+	return (issue.assignees ?? []).some(
+		(user) => user.login.trim().toLowerCase() === assignee
+	);
+}
+
+/**
  * Fill an inline chip with the loaded issue's details: colour the state dot,
  * show the title, and add an open/closed/in-progress status badge — turning the
  * bare `● #123` placeholder into `● #123 Issue title OPEN`. An open issue that
@@ -1183,12 +1214,62 @@ export function insertIssueReference(
 	}
 }
 
+/**
+ * Character offset of the first character of `line` (0-based) in `text`. Walks
+ * newline by newline rather than splitting the whole document, so a large note
+ * costs only as many scans as the target line index. Used by the right-click
+ * format converters (issue #70) to turn a section's line range into the exact
+ * character span a rewrite replaces — offsets are always derived here, never
+ * hand-counted, so a bad number cannot splice into the wrong place.
+ */
+export function lineStartOffset(text: string, line: number): number {
+	let offset = 0;
+	for (let i = 0; i < line; i++) {
+		const nl = text.indexOf("\n", offset);
+		if (nl === -1) {
+			return text.length;
+		}
+		offset = nl + 1;
+	}
+	return offset;
+}
+
+/**
+ * Character offset just before `line`'s terminating newline (or the end of the
+ * document for the last line). Paired with {@link lineStartOffset} to bound a
+ * line-based section without consuming the newline that follows it (issue #70).
+ */
+export function lineEndOffset(text: string, line: number): number {
+	const start = lineStartOffset(text, line);
+	const nl = text.indexOf("\n", start);
+	return nl === -1 ? text.length : nl;
+}
+
+/**
+ * The source text that replaces an inline chip token when converting it to a
+ * `gitea-issue` card (issue #70). A card is a fenced block and cannot sit inside
+ * a sentence, so when the chip shares its line with other prose the fence is
+ * pushed onto its own line with a leading newline — splitting the line into
+ * text-before / fence / text-after rather than refusing the conversion (issue
+ * #70 Q1). `textBeforeToken` is the same line's content up to the token; a blank
+ * or whitespace-only prefix means the chip already starts its line, so no
+ * leading newline is added. The card block builder's own trailing newline keeps
+ * any text-after on the line following the closing fence.
+ */
+export function chipToCardReplacement(textBeforeToken: string, ref: IssueRef): string {
+	const prefix = textBeforeToken.trim().length > 0 ? "\n" : "";
+	return prefix + buildIssueCardBlock(ref);
+}
+
 /** Default and hard cap for the number of cards a search block renders. */
 export const SEARCH_DEFAULT_LIMIT = 10;
 export const SEARCH_MAX_LIMIT = 50;
 
 /** Issue states accepted by both Gitea list endpoints. */
 const SEARCH_STATES = ["open", "closed", "all"] as const;
+
+/** The wizards' repo pickers spell an empty repo — a cross-repo query — this way. */
+const ALL_REPOS_LABEL = "All repositories (global)";
 
 /**
  * A parsed `gitea-search` block. `repo` null means a global, cross-repo search;
@@ -1204,6 +1285,12 @@ export interface SearchQuery {
 	labels: string[];
 	/** Milestone names to filter on. */
 	milestones: string[];
+	/**
+	 * Assignee username to filter on (issue #62). A single login: repo-scoped
+	 * queries pass it server-side as `assigned_by`; global queries have no such
+	 * param, so it is also matched client-side against each issue's assignees.
+	 */
+	assignee: string | null;
 	/** Free-text keyword query. */
 	q: string | null;
 	/** Maximum number of results to render, capped at {@link SEARCH_MAX_LIMIT}. */
@@ -1240,6 +1327,7 @@ export function parseSearchQuery(source: string): {
 		state: "open",
 		labels: [],
 		milestones: [],
+		assignee: null,
 		q: null,
 		limit: SEARCH_DEFAULT_LIMIT,
 		layout: "table",
@@ -1281,6 +1369,11 @@ export function parseSearchQuery(source: string): {
 			case "milestone":
 			case "milestones":
 				query.milestones = splitList(value);
+				break;
+			case "assignee":
+			case "assignees":
+			case "assigned":
+				query.assignee = value.length > 0 ? value : null;
 				break;
 			case "q":
 			case "query":
@@ -1330,6 +1423,7 @@ export function searchQueryKey(query: SearchQuery): string {
 		state: query.state,
 		labels: [...query.labels].sort(),
 		milestones: [...query.milestones].sort(),
+		assignee: query.assignee,
 		q: query.q,
 		limit: query.limit,
 	});
@@ -1355,6 +1449,9 @@ export function buildSearchQuerySource(query: SearchQuery): string {
 	}
 	if (query.milestones.length > 0) {
 		lines.push(`milestones: ${query.milestones.join(", ")}`);
+	}
+	if (query.assignee) {
+		lines.push(`assignee: ${query.assignee}`);
 	}
 	if (query.q) {
 		lines.push(`query: ${query.q}`);
@@ -2025,15 +2122,27 @@ export default class GiteaCardsPlugin extends Plugin {
 					);
 					return;
 				}
-				ctx.addChild(
-					new IssueCardChild(
-						el,
-						this,
-						block.ref,
-						ctx.sourcePath,
-						block.comments
-					)
+				const exporting = isExportingToPdf(el);
+				const child = new IssueCardChild(
+					el,
+					this,
+					block.ref,
+					ctx.sourcePath,
+					block.comments,
+					exporting,
+					ctx
 				);
+				ctx.addChild(child);
+				// Export-to-PDF snapshots the DOM synchronously right after this
+				// callback returns (issue #66). Obsidian awaits a code-block
+				// processor that returns a Promise, so on export we hand back a
+				// promise that resolves only once the issue and (if expanded) the
+				// comment thread are painted — the PDF then captures a finished
+				// card instead of "Loading…". Live preview returns void, so its
+				// fire-and-forget refresh is untouched.
+				if (exporting) {
+					return child.hydrateForExport();
+				}
 			}
 		);
 
@@ -2508,6 +2617,11 @@ export default class GiteaCardsPlugin extends Plugin {
 		if (query.milestones.length > 0) {
 			params.set("milestones", query.milestones.join(","));
 		}
+		if (query.assignee) {
+			// Repo endpoint honours `assigned_by` (issue #62); the global search
+			// endpoint ignores it, so fetchSearchIssues also filters client-side.
+			params.set("assigned_by", query.assignee);
+		}
 		if (query.q) {
 			params.set("q", query.q);
 		}
@@ -2545,6 +2659,20 @@ export default class GiteaCardsPlugin extends Plugin {
 	 * window, and interval floor already keep the request rate in check.
 	 */
 	async fetchSearchIssues(query: SearchQuery): Promise<SearchResultItem[]> {
+		// Gitea silently *drops* a milestone filter it can't resolve, returning the
+		// whole unfiltered set rather than nothing (issue #63). A filter naming a
+		// milestone that doesn't exist can never match an issue, so surface it as an
+		// empty result instead of every issue in the repo. Only checkable against a
+		// concrete repo; a global (cross-repo) search has no single repo to validate.
+		if (query.milestones.length > 0 && query.repo) {
+			const missing = await this.findMissingMilestones(
+				query.repo,
+				query.milestones
+			);
+			if (missing.length > 0) {
+				return [];
+			}
+		}
 		const base = this.settings.baseUrl.replace(/\/+$/, "");
 		const params = this.buildSearchParams(query);
 		const url = query.repo
@@ -2566,10 +2694,17 @@ export default class GiteaCardsPlugin extends Plugin {
 		);
 
 		const items = (response.json as GiteaListIssue[]) ?? [];
+		const assignee = query.assignee?.toLowerCase();
 		const results: SearchResultItem[] = [];
 		for (const item of items) {
 			if (item.pull_request != null) {
 				continue; // Drop PRs — list endpoints mix them in with issues.
+			}
+			// The global search endpoint has no assignee param, so filter here as
+			// well (issue #62); harmless for repo queries already narrowed by
+			// `assigned_by`.
+			if (assignee && !issueHasAssignee(item, assignee)) {
+				continue;
 			}
 			const ref = this.refForResult(query, item);
 			if (ref) {
@@ -2619,6 +2754,7 @@ export default class GiteaCardsPlugin extends Plugin {
 			state: query.state,
 			labels: query.labels,
 			milestones: query.milestones,
+			assignee: null,
 			q: query.q,
 			limit: query.limit,
 			layout: "table",
@@ -2626,19 +2762,18 @@ export default class GiteaCardsPlugin extends Plugin {
 	}
 
 	/**
-	 * Verify every milestone name a graph filters on actually exists in the repo.
-	 * Gitea's list endpoints silently *ignore* an unknown milestone name and return
-	 * the whole unfiltered set, so a typo'd or deleted milestone would otherwise
-	 * render as "all issues" rather than an error (issue #48). One
-	 * `GET .../milestones/{name}` per named milestone — a 404 means it does not
-	 * exist; the `{id|name}` endpoint matches by name regardless of state, so a
-	 * graph of a *completed* milestone still validates. Throws a single
-	 * {@link GiteaRequestError} naming the missing milestone(s).
+	 * Return the subset of named milestones that don't exist in the repo. Gitea's
+	 * list endpoints silently *ignore* an unknown milestone name and return the
+	 * whole unfiltered set, so a typo'd or deleted milestone otherwise reads as
+	 * "all issues" (issues #48, #63). One `GET .../milestones/{name}` per named
+	 * milestone — a 404 means it does not exist; the `{id|name}` endpoint matches
+	 * by name regardless of state, so a *completed* milestone still resolves.
+	 * Shared by graph validation (which errors) and search tables (which empty).
 	 */
-	private async assertMilestonesExist(
+	private async findMissingMilestones(
 		repo: string,
 		milestones: string[]
-	): Promise<void> {
+	): Promise<string[]> {
 		const base = this.settings.baseUrl.replace(/\/+$/, "");
 		const repoPath = this.repoPath(repo);
 		const headers = await this.buildAuthHeaders();
@@ -2662,6 +2797,20 @@ export default class GiteaCardsPlugin extends Plugin {
 				this.ensureGiteaOk(response, `Milestone "${name}" not found.`);
 			})
 		);
+		return missing;
+	}
+
+	/**
+	 * Verify every milestone name a graph filters on actually exists in the repo,
+	 * throwing a single {@link GiteaRequestError} naming the missing milestone(s)
+	 * so a typo'd or deleted milestone errors rather than rendering every issue
+	 * (issue #48).
+	 */
+	private async assertMilestonesExist(
+		repo: string,
+		milestones: string[]
+	): Promise<void> {
+		const missing = await this.findMissingMilestones(repo, milestones);
 		if (missing.length > 0) {
 			const label = missing.length === 1 ? "Milestone" : "Milestones";
 			const names = missing.map((name) => `"${name}"`).join(", ");
@@ -3109,23 +3258,26 @@ export default class GiteaCardsPlugin extends Plugin {
 		ref: IssueRef,
 		result: IssueLoadResult,
 		actions?: CardActions,
-		commentPreview?: CommentPreviewOptions
-	): void {
+		commentPreview?: CommentPreviewOptions,
+		// On an Export-to-PDF pass the returned Promise resolves only once the
+		// comment thread has fully painted, so the caller can await it (issue #66).
+		exporting = false
+	): Promise<void> | void {
 		el.empty();
 		if (result.value) {
 			// `actions` is passed even on a stale (offline) card so the manual
 			// refresh button stays available to retry; the write-gated quick
 			// actions inside are themselves dropped on a stale card by
 			// renderIssueCard (they would only fail without a live server).
-			this.renderIssueCard(
+			return this.renderIssueCard(
 				el,
 				ref,
 				result.value,
 				result.stale,
 				actions,
-				commentPreview
+				commentPreview,
+				exporting
 			);
-			return;
 		}
 		this.renderError(el, result.error?.message ?? "Failed to load issue.");
 	}
@@ -3182,7 +3334,9 @@ export default class GiteaCardsPlugin extends Plugin {
 		// Every card names its own repo on the status line (issue #22), so both
 		// global and per-repo search results carry their repo without extra work.
 		for (const item of result.value) {
-			this.renderIssueCard(container, item.ref, item.issue, false);
+			// Fire-and-forget: search-result cards never expand a thread, so the
+			// export return path is unused here. (#66)
+			void this.renderIssueCard(container, item.ref, item.issue, false);
 		}
 	}
 
@@ -3722,7 +3876,7 @@ export default class GiteaCardsPlugin extends Plugin {
 				repo: match[2],
 				index: Number.parseInt(match[3], 10),
 			};
-			code.replaceWith(this.createInlineChip(ref, ctx));
+			code.replaceWith(this.createInlineChip(ref, ctx, el));
 		}
 	}
 
@@ -3733,15 +3887,194 @@ export default class GiteaCardsPlugin extends Plugin {
 	 */
 	private createInlineChip(
 		ref: IssueRef,
-		ctx: MarkdownPostProcessorContext
+		ctx: MarkdownPostProcessorContext,
+		sectionEl: HTMLElement
 	): HTMLAnchorElement {
 		const chip = createChipElement(
 			this.settings.baseUrl,
 			ref,
 			this.settings.repoAccents[`${ref.owner}/${ref.repo}`]
 		);
-		ctx.addChild(new InlineChipChild(chip, this, ref));
+		// `sectionEl` (the post-processor's block root) is what carries reliable
+		// section info at right-click time — the replaced chip anchor does not — so
+		// the "Convert to card" handler resolves the source line range through it
+		// (issue #70).
+		ctx.addChild(new InlineChipChild(chip, this, ref, ctx, sectionEl));
 		return chip;
+	}
+
+	/**
+	 * Write `replacement` over the note's `[from, to)` character range (issue #70),
+	 * the shared writer behind every format conversion. When the note is the
+	 * active editable view its live editor is used, so an unsaved buffer is
+	 * respected rather than clobbered; every other surface (Reading view, hover
+	 * preview) falls back to a direct vault write. Obsidian re-renders the touched
+	 * block after either path, so the card/chip repaints on its own. Callers derive
+	 * `from`/`to` only from section info or a CodeMirror position and verify the
+	 * span before calling, so a stale offset no-ops rather than corrupting prose.
+	 */
+	async rewriteNoteRange(
+		sourcePath: string,
+		from: number,
+		to: number,
+		replacement: string
+	): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(sourcePath);
+		if (!(file instanceof TFile)) {
+			new Notice("Could not find this note to update.");
+			return;
+		}
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view?.file?.path === sourcePath) {
+			const editor = view.editor;
+			editor.replaceRange(
+				replacement,
+				editor.offsetToPos(from),
+				editor.offsetToPos(to)
+			);
+			return;
+		}
+		await this.app.vault.process(
+			file,
+			(data) => data.slice(0, from) + replacement + data.slice(to)
+		);
+	}
+
+	/**
+	 * Convert a rendered `gitea-issue` card back into a compact inline chip in the
+	 * note source (issue #70). The fenced block reports an exact line range through
+	 * `getSectionInfo`, so the whole fence is replaced with the backtick token.
+	 * No-ops when there is no section info (export-to-PDF, detached renders) or the
+	 * range no longer holds a fence, so a stale render cannot splice mid-note.
+	 */
+	async convertCardToChip(
+		ctx: MarkdownPostProcessorContext,
+		el: HTMLElement,
+		ref: IssueRef
+	): Promise<void> {
+		const info = ctx.getSectionInfo(el);
+		if (!info) {
+			return;
+		}
+		const from = lineStartOffset(info.text, info.lineStart);
+		const to = lineEndOffset(info.text, info.lineEnd);
+		if (!info.text.slice(from, to).startsWith("```")) {
+			new Notice("Could not locate the card block to convert.");
+			return;
+		}
+		await this.rewriteNoteRange(
+			ctx.sourcePath,
+			from,
+			to,
+			buildInlineChipReference(this.settings.keyword, ref)
+		);
+	}
+
+	/**
+	 * Convert a rendered inline chip into a `gitea-issue` card in the note source,
+	 * from the Reading-view render path (issue #70). Section info gives the
+	 * paragraph's line range and text but not which occurrence was clicked, so the
+	 * first matching token in the section is converted and — when the paragraph
+	 * holds a second identical reference — a Notice flags the ambiguity (issue #70
+	 * Q3; the Live-Preview path is exact and never hits this). The line is split
+	 * around the token so surrounding prose survives (issue #70 Q1).
+	 */
+	async convertChipToCard(
+		ctx: MarkdownPostProcessorContext,
+		sectionEl: HTMLElement,
+		ref: IssueRef
+	): Promise<void> {
+		const info = ctx.getSectionInfo(sectionEl);
+		if (!info) {
+			return;
+		}
+		const token = buildInlineChipReference(this.settings.keyword, ref);
+		const sectionFrom = lineStartOffset(info.text, info.lineStart);
+		const sectionTo = lineEndOffset(info.text, info.lineEnd);
+		const section = info.text.slice(sectionFrom, sectionTo);
+		const rel = section.indexOf(token);
+		if (rel === -1) {
+			new Notice("Could not locate the reference to convert.");
+			return;
+		}
+		const start = sectionFrom + rel;
+		const end = start + token.length;
+		const duplicated =
+			section.indexOf(token, rel + token.length) !== -1;
+		const lineStart = info.text.lastIndexOf("\n", start - 1) + 1;
+		const before = info.text.slice(lineStart, start);
+		await this.rewriteNoteRange(
+			ctx.sourcePath,
+			start,
+			end,
+			chipToCardReplacement(before, ref)
+		);
+		if (duplicated) {
+			new Notice(
+				"Converted the first matching reference in this paragraph."
+			);
+		}
+	}
+
+	/**
+	 * Right-click menu for a Live-Preview chip: the single "Convert to card"
+	 * toggle (issue #70 Q4 — no broader issue menu). The CodeMirror widget carries
+	 * an exact document position, so this path is unambiguous even for duplicate
+	 * references in one paragraph.
+	 */
+	showLiveChipMenu(
+		evt: MouseEvent,
+		view: EditorView,
+		chip: HTMLElement,
+		ref: IssueRef
+	): void {
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle("Convert to card")
+				.setIcon("layout-grid")
+				.onClick(() => this.convertLiveChipToCard(view, chip, ref))
+		);
+		menu.showAtMouseEvent(evt);
+	}
+
+	/**
+	 * Convert a Live-Preview chip to a card by dispatching straight to the editor
+	 * (issue #70). `posAtDOM` gives the chip widget's exact document offset; the
+	 * span is verified to still hold the token before writing, so a shifted
+	 * position aborts with a Notice instead of corrupting the note.
+	 */
+	private convertLiveChipToCard(
+		view: EditorView,
+		chip: HTMLElement,
+		ref: IssueRef
+	): void {
+		const token = buildInlineChipReference(this.settings.keyword, ref);
+		const doc = view.state.doc;
+		const anchor = view.posAtDOM(chip);
+		const line = doc.lineAt(anchor);
+		// `posAtDOM` normally lands on the widget's start; verify the token sits
+		// there, and otherwise fall back to the token's position on the widget's
+		// line, so a boundary quirk aborts or self-corrects rather than splicing
+		// the wrong span.
+		let start = anchor;
+		if (doc.sliceString(start, start + token.length) !== token) {
+			const rel = line.text.indexOf(token);
+			if (rel === -1) {
+				new Notice("Could not locate the reference to convert.");
+				return;
+			}
+			start = line.from + rel;
+		}
+		const end = start + token.length;
+		const before = doc.sliceString(line.from, start);
+		view.dispatch({
+			changes: {
+				from: start,
+				to: end,
+				insert: chipToCardReplacement(before, ref),
+			},
+		});
 	}
 
 	private renderError(el: HTMLElement, message: string): void {
@@ -3770,8 +4103,11 @@ export default class GiteaCardsPlugin extends Plugin {
 		issue: GiteaIssue,
 		stale = false,
 		actions?: CardActions,
-		commentPreview?: CommentPreviewOptions
-	): void {
+		commentPreview?: CommentPreviewOptions,
+		// During Export-to-PDF the comment thread is awaited instead of
+		// fire-and-forgotten, and this returns that Promise (issue #66).
+		exporting = false
+	): Promise<void> | void {
 		const isClosed = issue.state === "closed";
 		const card = el.createDiv({ cls: "gitea-card" });
 		this.applyRepoAccent(card, `${ref.owner}/${ref.repo}`);
@@ -3950,9 +4286,21 @@ export default class GiteaCardsPlugin extends Plugin {
 		// line and the action bar. Fetched lazily here (only while expanded) via
 		// the shared comments cache, so it refreshes on the card's cadence and
 		// degrades to last-known comments offline like everything else.
+		let threadHydration: Promise<void> | undefined;
 		if (canExpandComments && commentPreview.expanded) {
 			const thread = card.createDiv({ cls: "gitea-card__comments-thread" });
-			void this.renderCommentThread(thread, ref, commentPreview);
+			// Live preview fire-and-forgets (paint "Loading…", fill later); an
+			// export pass awaits the returned Promise so the thread is in the
+			// snapshot (issue #66).
+			threadHydration = this.renderCommentThread(
+				thread,
+				ref,
+				commentPreview,
+				exporting
+			);
+			if (!exporting) {
+				void threadHydration;
+			}
 		}
 
 		// Line 5 (single-issue card only) — quick actions. Refresh is always
@@ -3967,6 +4315,12 @@ export default class GiteaCardsPlugin extends Plugin {
 				void this.renderQuickActions(actionsEl, ref, issue, actions);
 			}
 		}
+
+		// Export path only: hand the caller a Promise that resolves once the
+		// thread (if any) has painted, so printToPDF snapshots a finished card.
+		if (exporting) {
+			return threadHydration ?? Promise.resolve();
+		}
 	}
 
 	/**
@@ -3980,15 +4334,19 @@ export default class GiteaCardsPlugin extends Plugin {
 	private async renderCommentThread(
 		container: HTMLElement,
 		ref: IssueRef,
-		preview: CommentPreviewOptions
+		preview: CommentPreviewOptions,
+		exporting = false
 	): Promise<void> {
 		container.createDiv({
 			cls: "gitea-card__comments-loading",
 			text: "Loading comments…",
 		});
 		const result = await this.commentsCache.load(ref, this.refreshIntervalMs);
-		// The card may have been torn down (or collapsed) while in flight.
-		if (!container.isConnected) {
+		// The card may have been torn down (or collapsed) while in flight. During
+		// an export we deliberately skip this bail: the print container Obsidian
+		// is about to snapshot may read as momentarily detached, and dropping the
+		// thread there is exactly the "Loading…" freeze this rescues (issue #66).
+		if (!exporting && !container.isConnected) {
 			return;
 		}
 		container.empty();
@@ -4022,8 +4380,14 @@ export default class GiteaCardsPlugin extends Plugin {
 				text: `Showing the latest ${recent.length} of ${all.length} comments.`,
 			});
 		}
+		const bodies: Array<Promise<void> | void> = [];
 		for (const comment of recent) {
-			this.renderComment(container, comment, preview);
+			bodies.push(this.renderComment(container, comment, preview));
+		}
+		// The comment bodies render Markdown asynchronously; on export we must
+		// await them so their text is in the snapshot, not just the containers.
+		if (exporting) {
+			await Promise.all(bodies.map((body) => Promise.resolve(body)));
 		}
 	}
 
@@ -4037,7 +4401,7 @@ export default class GiteaCardsPlugin extends Plugin {
 		container: HTMLElement,
 		comment: GiteaComment,
 		preview: CommentPreviewOptions
-	): void {
+	): Promise<void> {
 		const el = container.createDiv({ cls: "gitea-card__comment" });
 		const header = el.createDiv({ cls: "gitea-card__comment-header" });
 		header.createSpan({
@@ -4053,7 +4417,9 @@ export default class GiteaCardsPlugin extends Plugin {
 			header.createSpan({ cls: "gitea-card__comment-time", text: when });
 		}
 		const body = el.createDiv({ cls: "gitea-card__comment-body" });
-		void this.renderCommentBody(body, comment.body ?? "", preview);
+		// Returned so an export pass can await the async Markdown render; live
+		// preview callers ignore it (fire-and-forget). (#66)
+		return this.renderCommentBody(body, comment.body ?? "", preview);
 	}
 
 	/**
@@ -4696,7 +5062,14 @@ class IssueCardChild extends MarkdownRenderChild {
 		private readonly plugin: GiteaCardsPlugin,
 		private readonly ref: IssueRef,
 		private readonly sourcePath: string,
-		autoExpandComments: number | null
+		autoExpandComments: number | null,
+		// True only during an Export-to-PDF render pass — see isExportingToPdf and
+		// hydrateForExport (issue #66).
+		private readonly exporting = false,
+		// Present for a normal render; used to resolve the block's source line
+		// range for the right-click "Convert to inline chip" action (issue #70).
+		// Optional so export/other callers need not thread it through.
+		private readonly ctx?: MarkdownPostProcessorContext
 	) {
 		super(containerEl);
 		// A `comments:` block key auto-expands from the first render; its positive
@@ -4714,6 +5087,14 @@ class IssueCardChild extends MarkdownRenderChild {
 			cls: "gitea-card gitea-card--loading",
 			text: "Loading issue…",
 		});
+		// On an Export-to-PDF pass the code-block processor awaits
+		// hydrateForExport() instead; skip the fire-and-forget refresh and the
+		// refresh timer — there is no live, on-screen card to keep fresh, and the
+		// snapshot happens once, synchronously (issue #66).
+		if (this.exporting) {
+			return;
+		}
+		this.registerFormatMenu();
 		void this.refresh();
 
 		// Auto-cancelled on unload (note closed/scrolled away or plugin unload).
@@ -4728,6 +5109,39 @@ class IssueCardChild extends MarkdownRenderChild {
 		);
 	}
 
+	/**
+	 * Attach the right-click "Convert to inline chip" menu to the card (issue
+	 * #70). Bound on the container, which persists across the per-interval card
+	 * rebuilds, and torn down with the child via `registerDomEvent`. The same card
+	 * render path serves both Reading view and Live Preview, so this one handler
+	 * covers both surfaces. `preventDefault`/`stopPropagation` keep CodeMirror's
+	 * native context menu from opening on top in Live Preview.
+	 */
+	private registerFormatMenu(): void {
+		if (!this.ctx) {
+			return;
+		}
+		const ctx = this.ctx;
+		this.registerDomEvent(this.containerEl, "contextmenu", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const menu = new Menu();
+			menu.addItem((item) =>
+				item
+					.setTitle("Convert to inline chip")
+					.setIcon("link")
+					.onClick(() =>
+						void this.plugin.convertCardToChip(
+							ctx,
+							this.containerEl,
+							this.ref
+						)
+					)
+			);
+			menu.showAtMouseEvent(evt);
+		});
+	}
+
 	/** Pull from the shared cache and rebuild the card from the result. */
 	private async refresh(): Promise<void> {
 		const result = await this.plugin.cache.load(
@@ -4738,40 +5152,73 @@ class IssueCardChild extends MarkdownRenderChild {
 		if (!this.containerEl.isConnected) {
 			return;
 		}
-		this.plugin.renderCardResult(
+		// Fire-and-forget in live preview; hydrateForExport() takes the awaited path.
+		void this.plugin.renderCardResult(
 			this.containerEl,
 			this.ref,
 			result,
-			{
-				// A successful action invalidates this issue's cache entry and
-				// rebuilds the card from a fresh fetch; the rebuild clears any open
-				// editor, so refreshing is also resumed. The comments cache is
-				// dropped too, so a freshly posted comment shows in the thread.
-				onChanged: () => {
-					this.suspended = false;
-					this.plugin.cache.invalidate(this.ref);
-					this.plugin.commentsCache.invalidate(this.ref);
-					this.plugin.assetsCache.invalidate(this.ref);
-					void this.refresh();
-				},
-				setSuspended: (suspended) => {
-					this.suspended = suspended;
-				},
-			},
-			{
-				count: this.commentCount,
-				expanded: this.commentsExpanded,
-				component: this,
-				sourcePath: this.sourcePath,
-				// Toggling just flips the local flag and rebuilds from cache (no
-				// network unless the freshness window has lapsed) — expansion state
-				// is ephemeral and lives only on this child (issue #40).
-				onToggle: () => {
-					this.commentsExpanded = !this.commentsExpanded;
-					void this.refresh();
-				},
-			}
+			this.cardActions(),
+			this.commentPreviewOptions()
 		);
+	}
+
+	/**
+	 * Fully hydrate the card for an Export-to-PDF snapshot (issue #66). Awaits the
+	 * issue, then paints and awaits the (expanded) comment thread — including each
+	 * comment body's Markdown render — so the returned Promise resolves only once
+	 * the finished card is in the DOM Electron is about to snapshot. Unlike
+	 * {@link refresh} there is no `isConnected` guard: the export container stays
+	 * attached until `printToPDF` runs, and we must paint into the very container
+	 * it captures rather than bail if a transient detach is observed.
+	 */
+	async hydrateForExport(): Promise<void> {
+		const result = await this.plugin.cache.load(
+			this.ref,
+			this.plugin.refreshIntervalMs
+		);
+		await this.plugin.renderCardResult(
+			this.containerEl,
+			this.ref,
+			result,
+			this.cardActions(),
+			this.commentPreviewOptions(),
+			true
+		);
+	}
+
+	private cardActions(): CardActions {
+		return {
+			// A successful action invalidates this issue's cache entry and
+			// rebuilds the card from a fresh fetch; the rebuild clears any open
+			// editor, so refreshing is also resumed. The comments cache is
+			// dropped too, so a freshly posted comment shows in the thread.
+			onChanged: () => {
+				this.suspended = false;
+				this.plugin.cache.invalidate(this.ref);
+				this.plugin.commentsCache.invalidate(this.ref);
+				this.plugin.assetsCache.invalidate(this.ref);
+				void this.refresh();
+			},
+			setSuspended: (suspended) => {
+				this.suspended = suspended;
+			},
+		};
+	}
+
+	private commentPreviewOptions(): CommentPreviewOptions {
+		return {
+			count: this.commentCount,
+			expanded: this.commentsExpanded,
+			component: this,
+			sourcePath: this.sourcePath,
+			// Toggling just flips the local flag and rebuilds from cache (no
+			// network unless the freshness window has lapsed) — expansion state
+			// is ephemeral and lives only on this child (issue #40).
+			onToggle: () => {
+				this.commentsExpanded = !this.commentsExpanded;
+				void this.refresh();
+			},
+		};
 	}
 }
 
@@ -4947,12 +5394,35 @@ class InlineChipChild extends MarkdownRenderChild {
 	constructor(
 		chipEl: HTMLElement,
 		private readonly plugin: GiteaCardsPlugin,
-		private readonly ref: IssueRef
+		private readonly ref: IssueRef,
+		// Section context + the post-processor's block root, used to resolve the
+		// chip's source position for the right-click "Convert to card" action
+		// (issue #70). The replaced chip anchor cannot carry section info itself.
+		private readonly ctx: MarkdownPostProcessorContext,
+		private readonly sectionEl: HTMLElement
 	) {
 		super(chipEl);
 	}
 
 	onload(): void {
+		this.registerDomEvent(this.containerEl, "contextmenu", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			const menu = new Menu();
+			menu.addItem((item) =>
+				item
+					.setTitle("Convert to card")
+					.setIcon("layout-grid")
+					.onClick(() =>
+						void this.plugin.convertChipToCard(
+							this.ctx,
+							this.sectionEl,
+							this.ref
+						)
+					)
+			);
+			menu.showAtMouseEvent(evt);
+		});
 		void this.loadIssue();
 
 		// Auto-cancelled on unload (note closed/scrolled away or plugin unload).
@@ -5018,7 +5488,7 @@ class InlineChipWidget extends WidgetType {
 		);
 	}
 
-	toDOM(): HTMLElement {
+	toDOM(view: EditorView): HTMLElement {
 		const chip = createChipElement(
 			this.plugin.settings.baseUrl,
 			this.ref,
@@ -5029,6 +5499,16 @@ class InlineChipWidget extends WidgetType {
 		// Record the ref so the editor extension's refresh timer can find this
 		// chip's issue when it later re-pulls (issue #27).
 		liveChipRefs.set(chip, this.ref);
+		// Right-click → "Convert to card" (issue #70). `posAtDOM` resolves the
+		// widget's exact document position at click time, so this path stays
+		// correct even after edits shift the chip and never has the Reading-view
+		// duplicate-reference ambiguity. `preventDefault`/`stopPropagation` keep
+		// CodeMirror's own context menu from also opening.
+		chip.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			this.plugin.showLiveChipMenu(evt, view, chip, this.ref);
+		});
 		void this.plugin.cache
 			.load(this.ref, this.plugin.refreshIntervalMs)
 			.then((result) => {
@@ -5411,6 +5891,144 @@ class ImageLightboxModal extends Modal {
 	}
 }
 
+/** One entry in a searchable {@link addPicker} field (issue #64). */
+interface PickerOption {
+	/** Value handed to the picker's `onPick`. */
+	value: string;
+	/** Text shown in the field, and the primary thing typing is matched against. */
+	label: string;
+	/** Muted trailing detail — searched too, so `closed` or a slug narrows the list. */
+	note?: string;
+}
+
+/**
+ * Filter picker options by what's typed: every whitespace-separated token has to
+ * appear somewhere in the option's label or note, case-insensitively, with a
+ * leading `#` stripped so `#12` finds issue 12. Matches are ranked by where the
+ * first token lands, so a prefix hit sorts above a mid-string one.
+ */
+function filterPickerOptions(
+	options: PickerOption[],
+	query: string
+): PickerOption[] {
+	const tokens = query
+		.toLowerCase()
+		.split(/\s+/)
+		.map((token) => token.replace(/^#/, ""))
+		.filter((token) => token.length > 0);
+	if (tokens.length === 0) {
+		return options;
+	}
+	return options
+		.map((option) => ({
+			option,
+			haystack: `${option.label} ${option.note ?? ""}`.toLowerCase(),
+		}))
+		.filter((entry) =>
+			tokens.every((token) => entry.haystack.includes(token))
+		)
+		.sort((a, b) => a.haystack.indexOf(tokens[0]) - b.haystack.indexOf(tokens[0]))
+		.map((entry) => entry.option);
+}
+
+/**
+ * Backs {@link addPicker}. Typing in the field is a *query*, never a value: the
+ * field's text is always whatever the current selection reports, and a pick is
+ * only ever made by choosing a suggestion (Enter or click).
+ */
+class PickerSuggest extends AbstractInputSuggest<PickerOption> {
+	constructor(
+		app: App,
+		inputEl: HTMLInputElement,
+		private readonly options: () => PickerOption[],
+		private readonly onPick: (option: PickerOption) => void
+	) {
+		super(app, inputEl);
+	}
+
+	protected getSuggestions(query: string): PickerOption[] {
+		return filterPickerOptions(this.options(), query);
+	}
+
+	renderSuggestion(option: PickerOption, el: HTMLElement): void {
+		el.addClass("gitea-picker-suggestion");
+		el.createSpan({ text: option.label });
+		if (option.note) {
+			el.createSpan({
+				cls: "gitea-picker-suggestion__note",
+				text: option.note,
+			});
+		}
+	}
+
+	selectSuggestion(option: PickerOption): void {
+		this.close();
+		this.onPick(option);
+	}
+}
+
+/**
+ * Add a keyboard-searchable picker to a {@link Setting} — the replacement for the
+ * mouse-only `<select>` dropdowns the repo/issue/milestone controls used to be
+ * (issue #64). Focusing the field drops the whole list open (so it still behaves
+ * like a dropdown to a mouse), typing filters it, and up/down + Enter commit a
+ * choice, which is all inherited from {@link AbstractInputSuggest}.
+ *
+ * `display` is a *getter*, not a captured string, so restoring the field's text
+ * after a blur can never clobber a pick that landed in the same tick.
+ */
+function addPicker(
+	app: App,
+	setting: Setting,
+	config: {
+		options: () => PickerOption[];
+		display: () => string;
+		onPick: (option: PickerOption) => void;
+		placeholder?: string;
+		disabled?: boolean;
+	}
+): void {
+	setting.addText((text) => {
+		const input = text.inputEl;
+		input.addClass("gitea-picker");
+		input.placeholder = config.placeholder ?? "Type to search…";
+		input.value = config.display();
+		input.disabled = config.disabled ?? false;
+		// Clearing the field is what drops the *whole* list open: the suggester
+		// re-queries on every `input` event, and an empty query matches everything.
+		const openFullList = () => {
+			input.value = "";
+			input.dispatchEvent(new Event("input"));
+		};
+		new PickerSuggest(app, input, config.options, (option) => {
+			config.onPick(option);
+			input.value = config.display();
+			// A pick leaves focus in the field, so pre-select the text it just put
+			// there — otherwise the next keystroke would append to the label and
+			// search for a string no option can match.
+			input.select();
+		});
+		input.addEventListener("focus", openFullList);
+		// Focus alone can't cover reopening after a pick (the field never lost it),
+		// so a click on a field that's showing its selection reopens the list too —
+		// while leaving a half-typed query alone.
+		input.addEventListener("click", () => {
+			if (input.value === config.display()) {
+				openFullList();
+			}
+		});
+		// Put the selection's label back once focus has really left. Deferred because
+		// clicking a suggestion blurs the field *before* the pick is delivered.
+		input.addEventListener("blur", () => {
+			window.setTimeout(() => {
+				if (input.ownerDocument.activeElement !== input) {
+					input.value = config.display();
+				}
+			}, 0);
+		});
+	});
+}
+
 class InsertIssueModal extends Modal {
 	private repo: string;
 	private issues: InlineIssueSummary[] = [];
@@ -5498,16 +6116,16 @@ class InsertIssueModal extends Modal {
 			if (!this.repo && options.length > 0) {
 				this.repo = options[0];
 			}
-			setting.setDesc("Repository to insert an issue from.");
-			setting.addDropdown((dropdown) => {
-				for (const slug of options) {
-					dropdown.addOption(slug, slug);
-				}
-				dropdown.setValue(this.repo);
-				dropdown.onChange((value) => {
-					this.repo = value;
+			setting.setDesc("Repository to insert an issue from. Type to search.");
+			addPicker(this.app, setting, {
+				placeholder: "Search repositories…",
+				options: () =>
+					options.map((slug) => ({ value: slug, label: slug })),
+				display: () => this.repo,
+				onPick: (option) => {
+					this.repo = option.value;
 					void this.renderIssues();
-				});
+				},
 			});
 		} catch {
 			setting.setDesc("Repository in owner/repo form.");
@@ -5587,19 +6205,28 @@ class InsertIssueModal extends Modal {
 		}
 
 		this.selectedIndex = issues[0].index;
-		new Setting(container).setName("Issue").addDropdown((dropdown) => {
-			for (const issue of issues) {
-				const closed = issue.state === "closed" ? " (closed)" : "";
-				dropdown.addOption(
-					String(issue.index),
-					`#${issue.index} — ${issue.title}${closed}`
-				);
-			}
-			dropdown.setValue(String(this.selectedIndex));
-			dropdown.onChange((value) => {
-				this.selectedIndex = Number.parseInt(value, 10);
-			});
+		const setting = new Setting(container)
+			.setName("Issue")
+			.setDesc("Type a number or part of the title to search.");
+		addPicker(this.app, setting, {
+			placeholder: "Search issues…",
+			options: () =>
+				issues.map((issue) => ({
+					value: String(issue.index),
+					label: `#${issue.index} — ${issue.title}`,
+					note: issue.state === "closed" ? "closed" : undefined,
+				})),
+			display: () => this.issueLabel(this.selectedIndex),
+			onPick: (option) => {
+				this.selectedIndex = Number.parseInt(option.value, 10);
+			},
 		});
+	}
+
+	/** The picker's text for a selected issue index — `#12 — Title`, or blank. */
+	private issueLabel(index: number | null): string {
+		const issue = this.issues.find((candidate) => candidate.index === index);
+		return issue ? `#${issue.index} — ${issue.title}` : "";
 	}
 
 	/**
@@ -5833,17 +6460,17 @@ class NewIssueModal extends Modal {
 			if (!this.repo && options.length > 0) {
 				this.repo = options[0];
 			}
-			setting.setDesc("Repository to create the issue in.");
-			setting.addDropdown((dropdown) => {
-				for (const slug of options) {
-					dropdown.addOption(slug, slug);
-				}
-				dropdown.setValue(this.repo);
-				dropdown.onChange((value) => {
-					this.repo = value;
+			setting.setDesc("Repository to create the issue in. Type to search.");
+			addPicker(this.app, setting, {
+				placeholder: "Search repositories…",
+				options: () =>
+					options.map((slug) => ({ value: slug, label: slug })),
+				display: () => this.repo,
+				onPick: (option) => {
+					this.repo = option.value;
 					void this.renderMetadata();
 					void this.renderAttachSection();
-				});
+				},
 			});
 		} catch {
 			setting.setDesc("Repository in owner/repo form.");
@@ -6012,18 +6639,25 @@ class NewIssueModal extends Modal {
 	}
 
 	private renderMilestoneOption(container: HTMLElement): void {
-		new Setting(container).setName("Milestone").addDropdown((dropdown) => {
-			dropdown.addOption("", "None");
-			for (const milestone of this.milestones) {
-				dropdown.addOption(String(milestone.id), milestone.title);
-			}
-			// Reflect a milestone carried over from the originating search (issue #35).
-			dropdown.setValue(
-				this.milestoneId !== null ? String(this.milestoneId) : ""
-			);
-			dropdown.onChange((value) => {
-				this.milestoneId = value ? Number.parseInt(value, 10) : null;
-			});
+		const setting = new Setting(container).setName("Milestone");
+		addPicker(this.app, setting, {
+			placeholder: "Search milestones…",
+			options: () => [
+				{ value: "", label: "None" },
+				...this.milestones.map((milestone) => ({
+					value: String(milestone.id),
+					label: milestone.title,
+				})),
+			],
+			// Reflects a milestone carried over from the originating search (issue #35).
+			display: () =>
+				this.milestones.find((m) => m.id === this.milestoneId)?.title ??
+				"None",
+			onPick: (option) => {
+				this.milestoneId = option.value
+					? Number.parseInt(option.value, 10)
+					: null;
+			},
 		});
 	}
 
@@ -6336,6 +6970,8 @@ class SearchQueryWizardModal extends Modal {
 	private milestone = "";
 	/** Comma-separated milestone names in global mode. */
 	private milestonesText = "";
+	/** Assignee username to filter on ("" = any assignee, issue #62). */
+	private assignee = "";
 	private q = "";
 	private limit = SEARCH_DEFAULT_LIMIT;
 	private layout: SearchLayout = "table";
@@ -6382,6 +7018,16 @@ class SearchQueryWizardModal extends Modal {
 
 		// Labels / milestone depend on the repo; (re)built here.
 		this.metaEl = contentEl.createDiv();
+
+		new Setting(contentEl)
+			.setName("Assignee")
+			.setDesc("Filter to issues assigned to this username.")
+			.addText((text) => {
+				text.setPlaceholder("Optional").onChange((value) => {
+					this.assignee = value;
+					this.updatePreview();
+				});
+			});
 
 		new Setting(contentEl)
 			.setName("Keyword")
@@ -6467,6 +7113,7 @@ class SearchQueryWizardModal extends Modal {
 					? [this.milestone]
 					: []
 				: splitList(this.milestonesText),
+			assignee: this.assignee.trim() || null,
 			q: this.q.trim() || null,
 			limit: this.limit,
 			layout: this.layout,
@@ -6494,17 +7141,20 @@ class SearchQueryWizardModal extends Modal {
 			const options = [
 				...new Set([this.repo, ...repos].filter((slug) => slug.length > 0)),
 			];
-			setting.setDesc("Repository to search, or all repositories.");
-			setting.addDropdown((dropdown) => {
-				dropdown.addOption("", "All repositories (global)");
-				for (const slug of options) {
-					dropdown.addOption(slug, slug);
-				}
-				dropdown.setValue(this.repo);
-				dropdown.onChange((value) => {
-					this.repo = value;
+			setting.setDesc(
+				"Repository to search, or all repositories. Type to search."
+			);
+			addPicker(this.app, setting, {
+				placeholder: "Search repositories…",
+				options: () => [
+					{ value: "", label: ALL_REPOS_LABEL },
+					...options.map((slug) => ({ value: slug, label: slug })),
+				],
+				display: () => this.repo || ALL_REPOS_LABEL,
+				onPick: (option) => {
+					this.repo = option.value;
 					void this.renderMetadata();
-				});
+				},
 			});
 		} catch {
 			setting.setDesc("Repository in owner/repo form, or blank for all.");
@@ -6626,16 +7276,21 @@ class SearchQueryWizardModal extends Modal {
 	}
 
 	private renderMilestoneDropdown(container: HTMLElement): void {
-		new Setting(container).setName("Milestone").addDropdown((dropdown) => {
-			dropdown.addOption("", "None");
-			for (const milestone of this.milestones) {
-				dropdown.addOption(milestone.title, milestone.title);
-			}
-			dropdown.setValue("");
-			dropdown.onChange((value) => {
-				this.milestone = value;
+		const setting = new Setting(container).setName("Milestone");
+		addPicker(this.app, setting, {
+			placeholder: "Search milestones…",
+			options: () => [
+				{ value: "", label: "None" },
+				...this.milestones.map((milestone) => ({
+					value: milestone.title,
+					label: milestone.title,
+				})),
+			],
+			display: () => this.milestone || "None",
+			onPick: (option) => {
+				this.milestone = option.value;
 				this.updatePreview();
-			});
+			},
 		});
 	}
 
@@ -6851,17 +7506,20 @@ class GraphQueryWizardModal extends Modal {
 			const options = [
 				...new Set([this.repo, ...repos].filter((slug) => slug.length > 0)),
 			];
-			setting.setDesc("Repository to graph, or all repositories.");
-			setting.addDropdown((dropdown) => {
-				dropdown.addOption("", "All repositories (global)");
-				for (const slug of options) {
-					dropdown.addOption(slug, slug);
-				}
-				dropdown.setValue(this.repo);
-				dropdown.onChange((value) => {
-					this.repo = value;
+			setting.setDesc(
+				"Repository to graph, or all repositories. Type to search."
+			);
+			addPicker(this.app, setting, {
+				placeholder: "Search repositories…",
+				options: () => [
+					{ value: "", label: ALL_REPOS_LABEL },
+					...options.map((slug) => ({ value: slug, label: slug })),
+				],
+				display: () => this.repo || ALL_REPOS_LABEL,
+				onPick: (option) => {
+					this.repo = option.value;
 					void this.renderMetadata();
-				});
+				},
 			});
 		} catch {
 			setting.setDesc("Repository in owner/repo form, or blank for all.");
@@ -6967,33 +7625,40 @@ class GraphQueryWizardModal extends Modal {
 	 * which {@link renderMilestonePicker} owns. Called again on every add/remove so
 	 * the dropdown only offers milestones not already in the set.
 	 */
-	private renderMilestoneControls(section: HTMLElement): void {
+	private renderMilestoneControls(section: HTMLElement, focus = false): void {
 		section.empty();
 		const remaining = this.milestones.filter(
 			(milestone) => !this.selectedMilestones.has(milestone.title)
 		);
-		new Setting(section)
+		const setting = new Setting(section)
 			.setName("Add milestone")
-			.setDesc("Pick a milestone to add. A graph can span several.")
-			.addDropdown((dropdown) => {
-				dropdown.addOption(
-					"",
-					remaining.length > 0 ? "Choose a milestone…" : "All milestones added"
-				);
-				for (const milestone of remaining) {
-					dropdown.addOption(milestone.title, milestone.title);
-				}
-				dropdown.setValue("");
-				dropdown.setDisabled(remaining.length === 0);
-				dropdown.onChange((value) => {
-					if (!value) {
-						return;
-					}
-					this.selectedMilestones.add(value);
-					this.renderMilestoneControls(section);
-					this.updatePreview();
-				});
-			});
+			.setDesc("Type to search. A graph can span several milestones.");
+		addPicker(this.app, setting, {
+			placeholder:
+				remaining.length > 0
+					? "Search milestones…"
+					: "All milestones added",
+			disabled: remaining.length === 0,
+			options: () =>
+				remaining.map((milestone) => ({
+					value: milestone.title,
+					label: milestone.title,
+				})),
+			// The field stays empty: a pick moves into the chip set below, not here.
+			display: () => "",
+			onPick: (option) => {
+				this.selectedMilestones.add(option.value);
+				// Rebuilds this section — including the picker, whose option list must
+				// drop what was just added — so put focus back for a run of adds.
+				this.renderMilestoneControls(section, true);
+				this.updatePreview();
+			},
+		});
+		if (focus) {
+			section
+				.querySelector<HTMLInputElement>("input.gitea-picker")
+				?.focus();
+		}
 
 		if (this.selectedMilestones.size === 0) {
 			return;

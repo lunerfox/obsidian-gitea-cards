@@ -20,15 +20,23 @@ the editor.
   follow an issue's conversation without leaving the note. Comments are fetched
   lazily on first expand and refresh on the card's cadence. Add a `comments: 3`
   line under the reference to auto-expand the thread with a given count; the default
-  count is configurable in settings.
+  count is configurable in settings. A card with a `comments:` line also renders its
+  thread into an **Export to PDF** output (a card without one prints with no comments).
+- **On-card quick actions** — a single-issue card carries an action bar to manage the
+  issue without leaving the note: **Close** (or **Reopen**, for a closed issue) toggles
+  its state, **Comment** opens an inline box to post a comment, and **Labels** opens a
+  checkable menu to add or remove the repo's labels. These write actions appear only
+  once a per-repo probe confirms your token can edit issues (and never on a stale,
+  offline card, where they would only fail); a **Refresh** button is always offered.
 - **Auto-refresh + offline cache** — visible cards refresh on a configurable
   interval (default 60s, floored at 30s); a shared cache coalesces duplicate
   fetches, and unreachable cards render stale rather than erroring.
 - **Search & milestone blocks** — `gitea-search` lists issues by repo/state/
-  labels/milestone, as a compact chip-like table by default (`layout: cards`
-  for full cards); `gitea-milestone` renders a progress bar. A **Build search
-  query** command opens a wizard that fills the block's fields from dropdowns and
-  label chips with a live preview, so you never have to memorise the syntax.
+  labels/milestone/assignee, as a compact chip-like table by default (`layout:
+  cards` for full cards); `gitea-milestone` renders a progress bar. A **Build search
+  query** command opens a wizard that fills the block's fields from searchable
+  pickers and label chips with a live preview, so you never have to memorise the
+  syntax.
 - **Dependency graph** — a `gitea-graph` block scopes a milestone (or any search
   filter) and renders its issues as a dependency DAG: one node per issue coloured
   by state, edges drawn blocker → dependent from native Gitea dependencies (and
@@ -36,7 +44,7 @@ the editor.
   currently-unblocked work — what the issue processor picks up next — stands out.
   Add `direction: LR` for a left-to-right layout; click a node to open it in Gitea.
   A **Build graph view** command opens a wizard that scopes the graph to a *set*
-  of milestones (added from a dropdown, listed as removable chips), with the same
+  of milestones (added from a searchable picker, listed as removable chips), with the same
   repo/labels/state/limit/direction controls and live preview, so you never have
   to memorise the syntax.
 - **Create issues** — a command and modal to file issues (and convert a selection
@@ -45,6 +53,10 @@ the editor.
   or nothing at all — the choice is remembered for next time. A search block's
   **Add issue** button defaults to inserting nothing, since the new issue shows up
   in that table on the next refresh.
+- **Keyboard-searchable pickers** — every repository, issue, and milestone picker in
+  the modals is a search field, not a mouse-only dropdown: focus it to drop the full
+  list open, type to filter (an issue matches on its number *or* its title), and use
+  up/down + Enter to choose.
 - **Paste to card** — paste a Gitea issue URL (`…/owner/repo/issues/123`) into the
   editor and it is replaced in place with a live `gitea-issue` card. Only links on
   your configured base host are converted; other text and links paste untouched.
@@ -53,6 +65,12 @@ the editor.
   and the backtick-wrapped reference renders as a lightweight chip showing the
   issue title and open/closed status. A bare, un-backticked reference in prose is
   left as plain text.
+- **Right-click to switch presentation** — right-click a rendered card and choose
+  **Convert to inline chip**, or right-click a chip and choose **Convert to card**,
+  to flip an already-placed reference between the two formats in place — no
+  hand-editing of the Markdown. Works in Reading view and Live Preview. Converting
+  a chip that sits mid-sentence splits the line so the fenced card lands on its own
+  line and the surrounding prose is kept.
 - **Global access** — works off-LAN through Cloudflare Access using a service
   token, alongside a Gitea personal access token.
 
@@ -76,7 +94,7 @@ rendered element's lifecycle:
 | Block | Render child | Renders |
 | --- | --- | --- |
 | `gitea-issue` | `IssueCardChild` | one issue card from a single `owner/repo#index` reference |
-| `gitea-search` | `SearchBlockChild` | a chip-like table (or list of cards) from a repo/state/label/milestone query |
+| `gitea-search` | `SearchBlockChild` | a chip-like table (or list of cards) from a repo/state/label/milestone/assignee query |
 | `gitea-milestone` | `MilestoneBlockChild` | a progress bar from a milestone's open/closed counts |
 | `gitea-graph` | `GraphBlockChild` | a dependency DAG (SVG) of a milestone's/query's issues, coloured by state with blocker → dependent edges |
 

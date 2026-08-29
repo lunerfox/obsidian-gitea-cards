@@ -5,85 +5,22 @@
 > commit wrapper — lives in `CLAUDE.local.md`, which is gitignored and not part of
 > the public repo. Everything below is the general, public-safe guidance.
 
-## CRITICAL: Planning vs Implementation
-
-> **WARNING: Do NOT begin implementation when asked to "plan", "design", "think through", or "figure out" something.**
-
-When a request contains words like **plan**, **proposal**, **design**, **approach**, **strategy**, **think about**, **figure out**, **brainstorm**, or **consider**, this is a **planning request only**. It means:
-
-- **STOP** — do not edit any files
-- **STOP** — do not create any files
-- **STOP** — do not run any commands that modify state
-- **STOP** — do not start any services or containers
-- **DO** — write the plan down and present it
-- **DO** — ask for confirmation before doing anything else
-
-**A plan is only a plan. It is NOT permission to implement.** Implementation only begins when the user explicitly approves the plan and instructs you to proceed.
-
-If you are unsure whether a request is asking for a plan or asking for implementation, **default to planning only and ask the user to confirm** before touching any files.
-
----
-
-## Git
-
-This project is push-mirrored to the public `github.com/lunerfox/obsidian-gitea-cards` for the Obsidian community directory.
-
-**After making changes, commit and push using ONLY the files you changed — never `git add .`.**
-
-**Rules:**
-- Never commit `.env` or `data.json` — both hold secrets.
-- Never commit `CLAUDE.local.md` — it holds maintainer-specific paths and automation (it is gitignored).
-- `main.js` is a build artifact — it is gitignored and attached to releases, not committed as source.
-- Always push after committing so the mirror stays in sync.
-- Only stage files relevant to the task — one focused commit per unit of work.
-
----
-
-## Versioning
-
-> **BLOCKING RULE: every code change bumps the version. No exceptions.**
-> A commit that touches any shipped source (`main.ts`, `styles.css`, `esbuild.config.mjs`,
-> `manifest.json`, dependencies in `package.json` / `package-lock.json`, or anything else
-> that ends up in a release) is **not complete** until the version is bumped in the **same
-> unit of work**. If you changed code and did not change the version, you are not done —
-> go back and bump it before committing.
-
-**Every change that ships gets a minor version bump.** Do not bump patch versions — this project advances the **minor** version for each functional change, fix, or content update so each release is easy to track in the Obsidian community directory and in `versions.json`.
-
-```bash
-npm version minor
-```
-
-`npm version minor` runs `version-bump.mjs`, which keeps `manifest.json` and `versions.json` in lockstep (and creates the matching git tag). Run it as part of the same unit of work whenever you make a change worth releasing. If `npm version` can't run in your environment (no local git), bump by hand instead: set the new version in `package.json` **and** `manifest.json`, and append the new `"x.y.z": "<minAppVersion>"` line to `versions.json` — the exact three-file edit `version-bump.mjs` would have made.
-
-**"It's only a small change" is not an exception.** A dependency swap, a lint fix, a
-one-line tweak, a build-config edit — all of them ship, so all of them bump the version.
-The kind of change that slips through without a bump (e.g. replacing a devDependency) is
-exactly the kind this rule exists to catch.
-
-**Rules:**
-- Use `npm version minor` (not `patch`) for routine changes.
-- Reserve `npm version major` for breaking changes only (e.g. dropping config compatibility or changing the plugin `id`).
-- Confirm `package.json` `version`, `manifest.json` `version`, and the top key of `versions.json` all match the new minor version before committing.
-- The **only** commits that may skip a version bump are those that touch no shipped source at all — docs-only edits to `README.md` / `CLAUDE.md`, or changes under `CLAUDE.local.md`. Everything else bumps.
-
----
+Release, versioning, and community-review procedure live in the
+`obsidian-plugin-publish` skill. Only facts true of *this* repo live here.
 
 ## What this plugin is
 
 `gitea-cards` renders live, auto-refreshing Gitea issue cards inline in Obsidian notes and lets you create issues without leaving the editor. It is built from day one to pass Obsidian's **per-version automated community review**. The whole feature set rests on a single Gitea REST call per card, so everything ships as v1 under one milestone (`Obsidian Gitea Cards`).
 
-### Hard rules for community review (do not regress)
+## Repo facts
 
-- **`manifest.json`**: `id` is `gitea-cards` (lowercase, no `obsidian`, not ending in `plugin`); `name` is `Gitea Cards`; `version` is strict semver matching the release tag (no `v` prefix) and the top key of `versions.json`; `isDesktopOnly: false`.
-- **No Node/Electron APIs** — the plugin must run on mobile. Use `requestUrl()` from `obsidian` for every network call (Electron blocks plain `fetch` with CORS). No lookbehind in regexes.
-- **Build DOM** with `createEl`/`createDiv`/`createSpan`; never `innerHTML`. Clear with `el.empty()`.
-- **Sentence case** for all UI text; use `setHeading()` for section headings; no hardcoded inline styles — use CSS classes + Obsidian CSS variables in `styles.css`.
-- **Secrets** (Gitea PAT, Cloudflare Access client ID/secret) live in `app.secretStorage` (OS keychain), never in `data.json`.
-- Register everything that needs teardown (`registerInterval`, `registerEvent`, `registerDomEvent`, `addCommand`) so it auto-cleans on unload.
-- Keep `eslint-plugin-obsidianmd` clean (`npm run lint`) and `manifest`/`versions` in lockstep on **every** release. `npm version patch|minor|major` runs `version-bump.mjs` to keep them aligned.
+- **`manifest.json` identity:** `id` is `gitea-cards`; `name` is `Gitea Cards`.
+- **Public home:** the plugin is published to `github.com/lunerfox/obsidian-gitea-cards`
+  for the Obsidian community directory.
+- **Secrets:** the Gitea PAT and the Cloudflare Access client ID/secret live in
+  `app.secretStorage`, never in `data.json`.
 
-### Gitea / Cloudflare specifics
+## Gitea / Cloudflare specifics
 
 - Build issue/card links from the **configured base URL** + `/{owner}/{repo}/issues/{index}` — ignore the API's `html_url` host (a self-hosted Gitea's `ROOT_URL` is often a LAN address).
 - Gitea has **no ETag and no rate limiter** — coalesce duplicate fetches, share one cache keyed by `owner/repo#index`, and floor the refresh interval (≥ 30s, see `MIN_REFRESH_SECONDS`).
@@ -91,10 +28,6 @@ exactly the kind this rule exists to catch.
 - Create takes label/milestone **IDs**; list filters take **names** — map in the plugin.
 - Cloudflare path sends `CF-Access-Client-Id` + `CF-Access-Client-Secret` + `Authorization: token <PAT>`. A `302 → *.cloudflareaccess.com` is an edge reject (do **not** auto-follow); a `401/403` with a Gitea JSON body is a Gitea auth failure. The Access policy action must be **Service Auth**, not Allow.
 
-### Layout
+## Layout
 
 `main.ts` → `main.js` (esbuild), `styles.css`, `manifest.json`, `versions.json`, `version-bump.mjs`. CI lints + builds on a self-hosted runner via `.gitea/workflows/ci.yml`; the GitHub mirror cuts releases via `.github/workflows/release.yml`.
-
-## Validation
-
-Before declaring a ticket complete, run `npm install && npm run lint && npm run build` (or let CI do it) and confirm `npx eslint .` is clean and `main.js` builds. **If the ticket changed any shipped source, confirm the version was bumped** (`package.json`, `manifest.json`, and the top key of `versions.json` all agree on the new minor version) — an un-bumped code change is an incomplete ticket. Report what was checked.

@@ -991,6 +991,23 @@ a.gitea-graph__title:hover,
 	white-space: nowrap;
 }
 
+/* Searchable repo / issue / milestone pickers in the modals (issue #64) */
+.gitea-picker-suggestion {
+	display: flex;
+	align-items: baseline;
+	gap: var(--size-4-2);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.gitea-picker-suggestion__note {
+	flex-shrink: 0;
+	margin-left: auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
 /* New-issue / convert-selection modal */
 .gitea-new-issue__body {
 	width: 100%;
