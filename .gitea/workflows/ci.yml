@@ -1,6 +1,6 @@
 # .gitea/workflows/ci.yml
-# Lint + build on every push and pull request. Runs on a self-hosted runner
-# labelled [self-hosted, nas]; adjust runs-on to match your own runner.
+# Lint + test + build on every push and pull request. Runs on a self-hosted
+# runner labelled [self-hosted, nas]; adjust runs-on to match your own runner.
 name: ci
 
 on:
@@ -8,7 +8,7 @@ on:
     pull_request:
 
 jobs:
-    lint-build:
+    lint-test-build:
         runs-on: [self-hosted, nas]
         steps:
             - uses: actions/checkout@v4
@@ -18,6 +18,9 @@ jobs:
 
             - name: Lint (eslint-plugin-obsidianmd)
               run: npm run lint
+
+            - name: Test
+              run: npm test
 
             - name: Build
               run: npm run build

@@ -335,6 +335,18 @@
 	text-decoration: underline;
 }
 
+/* The milestone is a link to its Gitea page (issue #71) — keep it muted and
+ * undecorated like the repo link, underlining only on hover so it reads as
+ * part of the meta row rather than a default blue anchor. */
+.gitea-card__milestone {
+	text-decoration: none;
+}
+
+.gitea-card__milestone:hover {
+	color: var(--text-normal);
+	text-decoration: underline;
+}
+
 .gitea-card__avatar {
 	display: inline-flex;
 	align-items: center;
